@@ -1,0 +1,58 @@
+services:
+  # MediaMTX RTSP Server
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: mock-camera-mediamtx
+    restart: unless-stopped
+    ports:
+      - "8554:8554"  # RTSP port
+      - "8322:8322"  # RTSP-UDP port (optional)
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+    networks:
+      - mock-camera-network
+
+  # Mock ONVIF Camera Service
+  mock-camera:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mock-camera-service
+    restart: unless-stopped
+    depends_on:
+      - mediamtx
+    ports:
+      - "9999:9999"       # Web UI
+      - "12000-12999:12000-12999"  # ONVIF services (up to 1,000 cameras)
+    volumes:
+      # Persist camera data
+      - ./data:/app/data
+      # Optional: Mount video directory for easy access
+      # - ./videos:/app/videos:ro
+    environment:
+      # MediaMTX connection settings
+      - MEDIAMTX_HOST=mediamtx
+      - MEDIAMTX_PORT=8554
+      # Server IP (set this to your host machine's IP for external access)
+      # Usage: SERVER_IP=192.168.1.100 docker compose up -d
+      - SERVER_IP=${SERVER_IP:-}
+      # Service settings
+      - FLASK_ENV=production
+      - PYTHONUNBUFFERED=1
+    networks:
+      - mock-camera-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9999/cameras"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+networks:
+  mock-camera-network:
+    driver: bridge
+
+volumes:
+  camera-data:
+    driver: local
+

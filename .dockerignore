@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# Data directories (will be mounted as volumes)
+data/videos/*
+data/cameras/*
+data/ffmpeg_logs/*
+data/onvif_logs/*
+
+# Keep directory structure
+!data/videos/.gitkeep
+!data/cameras/.gitkeep
+!data/ffmpeg_logs/.gitkeep
+!data/onvif_logs/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Git
+.git/
+.gitignore
+
+# Documentation
+README.md
+*.md
+
+# Scripts (not needed in container)
+setup.sh
+start.sh
+
+# Logs
+*.log

@@ -1,0 +1,35 @@
+# Runtime data - ignore actual content but keep directory structure
+data/videos/*
+data/cameras/*
+data/snapshots/*
+
+# Keep directory structure
+!data/videos/.gitkeep
+!data/cameras/.gitkeep
+!data/snapshots/.gitkeep
+
+# Logs directory
+logs/
+*.log
+
+# Python virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment variables
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

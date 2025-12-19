@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mock ONVIF Camera Service</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;700;900&family=Rajdhani:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <div class="container">
+        <header class="header">
+            <div class="logo">
+                <h1>MOCK ONVIF CAMERA SERVICE</h1>
+            </div>
+        </header>
+
+        <main>
+            <section class="upload-section">
+                <div class="section-header">
+                    <h2>DEPLOY NEW CAMERA</h2>
+                    <div class="section-line"></div>
+                </div>
+
+                <div class="upload-zone" id="uploadZone">
+                    <input type="file" id="videoFile" accept="video/*" hidden>
+                    <div class="upload-content">
+                        <div class="upload-icon">
+                            <svg width="64" height="64" viewBox="0 0 64 64" fill="none"
+                                xmlns="http://www.w3.org/2000/svg">
+                                <path d="M32 12L32 42M32 12L22 22M32 12L42 22" stroke="currentColor" stroke-width="3"
+                                    stroke-linecap="round" stroke-linejoin="round" />
+                                <path
+                                    d="M12 42L12 48C12 50.2091 13.7909 52 16 52L48 52C50.2091 52 52 50.2091 52 48L52 42"
+                                    stroke="currentColor" stroke-width="3" stroke-linecap="round" />
+                            </svg>
+                        </div>
+                        <p class="upload-title">DROP VIDEO FILE HERE</p>
+                        <p class="upload-subtitle">or click to browse</p>
+                        <div class="upload-formats">MP4 / AVI / MOV</div>
+                        <div class="upload-hint">Recommended: Videos longer than 5 seconds</div>
+                    </div>
+                    <div class="upload-progress" id="uploadProgress" style="display: none;">
+                        <div class="progress-bar">
+                            <div class="progress-fill"></div>
+                        </div>
+                        <p class="progress-text">DEPLOYING CAMERA...</p>
+                    </div>
+                </div>
+            </section>
+
+            <section class="cameras-section">
+                <div class="section-header">
+                    <div class="section-header-left">
+                        <h2>ACTIVE CAMERAS</h2>
+                        <div class="camera-count" id="cameraCount">0</div>
+                        <button class="refresh-btn" id="refreshBtn" title="Refresh cameras">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="2">
+                                <path
+                                    d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" />
+                            </svg>
+                        </button>
+                        <div class="section-line"></div>
+                    </div>
+
+                    <!-- Filters -->
+                    <div class="cameras-filters" style="display: none;">
+                        <div class="filter-group">
+                            <span class="filter-label">Resolution:</span>
+                            <div class="filter-buttons" data-filter-container="preset">
+                                <button class="filter-btn active" data-filter-type="preset"
+                                    data-filter-value="all">All</button>
+                                <button class="filter-btn" data-filter-type="preset"
+                                    data-filter-value="480p">480p</button>
+                                <button class="filter-btn" data-filter-type="preset"
+                                    data-filter-value="720p">720p</button>
+                                <button class="filter-btn" data-filter-type="preset"
+                                    data-filter-value="1080p">1080p</button>
+                                <button class="filter-btn" data-filter-type="preset" data-filter-value="4k">4K</button>
+                                <button class="filter-btn" data-filter-type="preset" data-filter-value="5k">5K</button>
+                                <button class="filter-btn" data-filter-type="preset"
+                                    data-filter-value="custom">Custom</button>
+                            </div>
+                        </div>
+                        <div class="filter-group">
+                            <span class="filter-label">Type:</span>
+                            <div class="filter-buttons" data-filter-container="type">
+                                <button class="filter-btn active" data-filter-type="type"
+                                    data-filter-value="all">All</button>
+                                <button class="filter-btn" data-filter-type="type"
+                                    data-filter-value="single">Single</button>
+                                <button class="filter-btn" data-filter-type="type"
+                                    data-filter-value="batch">Batch</button>
+                                <button class="filter-btn" data-filter-type="type" data-filter-value="sub">Sub</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="cameras-grid" id="camerasGrid">
+                    <!-- Camera cards will be inserted here -->
+                </div>
+
+                <div class="empty-state" id="emptyState">
+                    <svg width="120" height="120" viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <rect x="20" y="30" width="80" height="60" rx="4" stroke="currentColor" stroke-width="2"
+                            opacity="0.3" />
+                        <circle cx="60" cy="60" r="15" stroke="currentColor" stroke-width="2" opacity="0.3" />
+                        <line x1="60" y1="20" x2="60" y2="30" stroke="currentColor" stroke-width="2" opacity="0.3" />
+                        <line x1="60" y1="90" x2="60" y2="100" stroke="currentColor" stroke-width="2" opacity="0.3" />
+                    </svg>
+                    <p>NO CAMERAS DEPLOYED</p>
+                    <p class="empty-subtitle">Upload a video to create your first mock camera</p>
+                </div>
+            </section>
+        </main>
+
+        <footer class="footer">
+            <div class="footer-content">
+                <div class="footer-line"></div>
+                <div class="footer-text">
+                    <span class="footer-label">MADE WITH <span class="footer-heart">♥</span> BY</span>
+                    <span class="footer-name">DOPIZ</span>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <div class="toast" id="toast">
+        <div class="toast-content"></div>
+    </div>
+
+    <div class="thumbnail-tooltip" id="thumbnailTooltip">
+        <img id="thumbnailImage" alt="Camera Snapshot">
+        <div class="thumbnail-label" id="thumbnailLabel"></div>
+    </div>
+
+    <!-- Transcode Preset Modal -->
+    <div id="presetModal" class="modal">
+        <div class="modal-content">
+            <div class="camera-count-section">
+                <h3>Camera Count</h3>
+                <p class="camera-count-desc">Select how many cameras to create with this video</p>
+                <div class="camera-count-options">
+                    <label class="camera-count-option">
+                        <input type="radio" name="cameraCount" value="1" checked>
+                        <div class="count-card">
+                            <div class="count-title">Single Camera</div>
+                            <div class="count-desc">Create 1 camera</div>
+                        </div>
+                    </label>
+                    <label class="camera-count-option">
+                        <input type="radio" name="cameraCount" value="batch">
+                        <div class="count-card">
+                            <div class="count-title-row">
+                                <span class="count-title">Multi-Cameras</span>
+                                <input type="number" id="batchCameraCount" class="batch-count-input" min="2" max="50"
+                                    value="50">
+                            </div>
+                            <div class="count-desc">Batch deployment (Single Shared Video Source)</div>
+                        </div>
+                    </label>
+                </div>
+            </div>
+
+            <div class="quality-section">
+                <div class="quality-header-row">
+                    <h3>Transcode Quality</h3>
+                    <label class="sub-profile-checkbox">
+                        <input type="checkbox" id="subProfile" name="subProfile">
+                        <span class="checkbox-label">Enable Second Profile (480p)</span>
+                    </label>
+                </div>
+                <p class="modal-subtitle">Original resolution: <span id="originalResolution">Detecting...</span></p>
+            </div>
+
+            <div class="preset-options">
+                <label class="preset-option">
+                    <input type="radio" name="preset" value="480p">
+                    <div class="preset-card">
+                        <div class="preset-header">
+                            <div class="preset-title">480p</div>
+                            <span class="preset-badge recommended-badge" style="display: none;">RECOMMENDED</span>
+                            <span class="preset-badge upscale-badge" style="display: none;">⚠️ UPSCALE</span>
+                        </div>
+                        <div class="preset-desc">854x480 @ 24fps · 1 Mbps</div>
+                    </div>
+                </label>
+
+                <label class="preset-option">
+                    <input type="radio" name="preset" value="720p">
+                    <div class="preset-card">
+                        <div class="preset-header">
+                            <div class="preset-title">720p</div>
+                            <span class="preset-badge recommended-badge" style="display: none;">RECOMMENDED</span>
+                            <span class="preset-badge upscale-badge" style="display: none;">⚠️ UPSCALE</span>
+                        </div>
+                        <div class="preset-desc">1280x720 @ 30fps · 2.5 Mbps</div>
+                    </div>
+                </label>
+
+                <label class="preset-option">
+                    <input type="radio" name="preset" value="1080p" checked>
+                    <div class="preset-card">
+                        <div class="preset-header">
+                            <div class="preset-title">1080p</div>
+                            <span class="preset-badge recommended-badge" style="display: none;">RECOMMENDED</span>
+                            <span class="preset-badge upscale-badge" style="display: none;">⚠️ UPSCALE</span>
+                        </div>
+                        <div class="preset-desc">1920x1080 @ 30fps · 4 Mbps</div>
+                    </div>
+                </label>
+
+                <label class="preset-option">
+                    <input type="radio" name="preset" value="4k">
+                    <div class="preset-card">
+                        <div class="preset-header">
+                            <div class="preset-title">4K</div>
+                            <span class="preset-badge recommended-badge" style="display: none;">RECOMMENDED</span>
+                            <span class="preset-badge upscale-badge" style="display: none;">⚠️ UPSCALE</span>
+                        </div>
+                        <div class="preset-desc">3840x2160 @ 30fps · 15 Mbps</div>
+                    </div>
+                </label>
+
+                <label class="preset-option">
+                    <input type="radio" name="preset" value="5k">
+                    <div class="preset-card">
+                        <div class="preset-header">
+                            <div class="preset-title">5K</div>
+                            <span class="preset-badge recommended-badge" style="display: none;">RECOMMENDED</span>
+                            <span class="preset-badge upscale-badge" style="display: none;">⚠️ UPSCALE</span>
+                        </div>
+                        <div class="preset-desc">5120x2880 @ 24fps · 25 Mbps</div>
+                    </div>
+                </label>
+
+                <label class="preset-option">
+                    <input type="radio" name="preset" value="custom">
+                    <div class="preset-card custom-preset-card">
+                        <div class="preset-header">
+                            <div class="preset-title">Custom</div>
+                        </div>
+                        <div class="preset-desc">Customize all parameters</div>
+                    </div>
+                </label>
+            </div>
+
+            <!-- Custom Parameters Section (hidden by default) -->
+            <div id="customParamsSection" class="custom-params-section" style="display: none;">
+                <h3>Custom Parameters</h3>
+                <p class="custom-note">⚠️ Note: Upscaling beyond original parameters will not improve quality</p>
+
+                <div class="custom-params-grid">
+                    <div class="custom-param-group">
+                        <label class="custom-label">Resolution</label>
+                        <div class="resolution-inputs">
+                            <input type="number" id="customWidth" class="custom-input" placeholder="Width" min="320"
+                                max="7680" value="1920">
+                            <span class="resolution-separator">×</span>
+                            <input type="number" id="customHeight" class="custom-input" placeholder="Height" min="240"
+                                max="4320" value="1080">
+                        </div>
+                        <span class="custom-hint">Width: 320-7680, Height: 240-4320</span>
+                    </div>
+
+                    <div class="custom-param-group">
+                        <label class="custom-label">FPS (Frames Per Second)</label>
+                        <div class="fps-input-group">
+                            <input type="range" id="customFpsSlider" class="custom-slider" min="1" max="60" step="0.1"
+                                value="30">
+                            <input type="number" id="customFps" class="custom-input fps-input" min="1" max="60"
+                                step="0.1" value="30">
+                        </div>
+                        <span class="custom-hint">Range: 1-60 fps</span>
+                    </div>
+
+                    <div class="custom-param-group">
+                        <label class="custom-label">Video Bitrate</label>
+                        <div class="bitrate-input-group">
+                            <input type="number" id="customVideoBitrate" class="custom-input" step="0.1" min="0.5"
+                                max="50" value="4.0">
+                            <span class="bitrate-unit">Mbps</span>
+                        </div>
+                        <span class="custom-hint suggested-bitrate">Suggested: <span id="suggestedBitrate">4.0</span>
+                            Mbps</span>
+                    </div>
+
+                    <div class="custom-param-group">
+                        <label class="custom-label">Audio Bitrate</label>
+                        <select id="customAudioBitrate" class="custom-select">
+                            <option value="64k">64 kbps</option>
+                            <option value="128k" selected>128 kbps</option>
+                            <option value="192k">192 kbps</option>
+                            <option value="256k">256 kbps</option>
+                        </select>
+                        <span class="custom-hint">Recommended: 128k for standard quality</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-actions">
+                <div class="upscale-warning" id="upscaleWarning" style="display: none;">
+                    <span class="warning-icon">⚠️</span>
+                    <span class="warning-text">
+                        Warning: Selected resolution is higher than original video.
+                        Upscaling will not improve quality and may increase file size.
+                    </span>
+                </div>
+                <div class="modal-buttons">
+                    <button id="cancelPreset" class="btn btn-secondary">Cancel</button>
+                    <button id="confirmPreset" class="btn btn-primary">Confirm Upload</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+
+</html>
