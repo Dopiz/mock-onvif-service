@@ -228,7 +228,7 @@ echo "-----------------------------------"
 
 if [ ! -d ".venv" ]; then
     echo "Creating virtual environment..."
-    uv venv
+    uv venv --python=3.13
 fi
 
 echo "Installing dependencies..."

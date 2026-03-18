@@ -3,17 +3,17 @@ import socket
 
 
 def get_server_ip():
-    """Get the server's IP address
+    """Get the server's external IP address for RTSP/ONVIF URLs
 
     Priority:
-    1. SERVER_IP environment variable (for Docker deployment with host IP)
+    1. EXTERNAL_IP environment variable (for Docker deployment with host IP)
     2. Auto-detect via socket connection
     3. Fallback to 127.0.0.1
     """
-    # Check if SERVER_IP is set (for Docker)
-    server_ip = os.getenv('SERVER_IP')
-    if server_ip:
-        return server_ip
+    # Check if EXTERNAL_IP is set (for Docker)
+    external_ip = os.getenv('EXTERNAL_IP')
+    if external_ip:
+        return external_ip
 
     try:
         # Create a socket to determine the local IP

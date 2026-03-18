@@ -1,6 +1,22 @@
 // API Base URL
 const API_BASE = '';
 
+// Video Edit Limits
+const EDIT_LIMITS = {
+    MIN_DURATION: 5,       // Minimum output duration in seconds
+    MAX_DURATION: 180,     // Maximum output duration in seconds (3 minutes)
+    MIN_SPEED: 0.5,        // Minimum playback speed
+    MAX_SPEED: 4.0         // Maximum playback speed
+};
+
+// Video edit state
+let videoPreviewUrl = null;
+let originalVideoDuration = 0;
+let trimStart = 0;
+let trimEnd = 0;
+let playbackSpeed = 1.0;
+let extendLastFrame = false;
+
 // DOM Elements
 const uploadZone = document.getElementById('uploadZone');
 const videoFile = document.getElementById('videoFile');
@@ -35,11 +51,450 @@ const filterState = {
 // All cameras data (unfiltered)
 let allCamerasData = [];
 
+// Preset pixel thresholds (width * height) - shared constants
+const PRESET_PIXELS = {
+    '720p': 1280 * 720,      // 921,600
+    '1080p': 1920 * 1080,    // 2,073,600
+    '2k': 2688 * 1512,       // 4,064,256
+    '4k': 3840 * 2160,       // 8,294,400
+    '5k': 5120 * 2880        // 14,745,600
+};
+
+// Get preset label from pixel count
+// Note: anything > 4K is considered 5K
+function getPresetFromPixels(pixels) {
+    if (pixels > PRESET_PIXELS['4k']) return '5k';
+    if (pixels > PRESET_PIXELS['2k']) return '4k';
+    if (pixels > PRESET_PIXELS['1080p']) return '2k';
+    if (pixels > PRESET_PIXELS['720p']) return '1080p';
+    return '720p';
+}
+
+// Derive preset label from resolution (for UI display and filtering)
+function derivePresetLabel(camera) {
+    const width = camera.width;
+    const height = camera.height;
+    if (!width || !height) return 'unknown';
+    return getPresetFromPixels(width * height);
+}
+
+// ==================== Video Editing Functions ====================
+
+// Drag state for trim handles
+let isDraggingTrimStart = false;
+let isDraggingTrimEnd = false;
+let isDraggingTimeline = false;
+
+// Format seconds to MM:SS or M:SS
+function formatDuration(seconds) {
+    if (isNaN(seconds) || seconds < 0) return '0:00';
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+}
+
+// Setup video preview with the selected file
+function setupVideoPreview(file) {
+    const videoPreview = document.getElementById('videoPreview');
+    const totalTimeEl = document.getElementById('totalTime');
+
+    if (!videoPreview) {
+        return;
+    }
+
+    // Revoke previous URL if exists
+    if (videoPreviewUrl) {
+        URL.revokeObjectURL(videoPreviewUrl);
+    }
+
+    // Create new preview URL
+    videoPreviewUrl = URL.createObjectURL(file);
+    videoPreview.src = videoPreviewUrl;
+
+    // Wait for metadata to load
+    videoPreview.onloadedmetadata = () => {
+        originalVideoDuration = videoPreview.duration;
+        if (totalTimeEl) totalTimeEl.textContent = formatDuration(originalVideoDuration);
+
+        // Set default trim values (full video)
+        trimStart = 0;
+        trimEnd = originalVideoDuration;
+
+        // Apply current playback speed to preview
+        videoPreview.playbackRate = playbackSpeed;
+
+        // Initialize timeline UI and interactions
+        updateTimelineUI();
+        setupTimelineInteractions();
+
+        // Update output duration
+        updateOutputDuration();
+    };
+
+}
+
+// Update all timeline UI elements
+function updateTimelineUI() {
+    const video = document.getElementById('videoPreview');
+    if (!video || !originalVideoDuration) return;
+
+    const trimRange = document.getElementById('timelineTrimRange');
+    const progress = document.getElementById('timelineProgress');
+    const startHandle = document.getElementById('trimHandleStart');
+    const endHandle = document.getElementById('trimHandleEnd');
+    const startTime = document.getElementById('trimStartTime');
+    const endTime = document.getElementById('trimEndTime');
+    const currentTimeEl = document.getElementById('currentTime');
+    const trimStartDisplay = document.getElementById('trimStartDisplay');
+    const trimEndDisplay = document.getElementById('trimEndDisplay');
+
+    const startPercent = (trimStart / originalVideoDuration) * 100;
+    const endPercent = (trimEnd / originalVideoDuration) * 100;
+    const currentPercent = (video.currentTime / originalVideoDuration) * 100;
+
+    // Update trim range highlight
+    if (trimRange) {
+        trimRange.style.left = startPercent + '%';
+        trimRange.style.width = (endPercent - startPercent) + '%';
+    }
+
+    // Update progress bar (shows current playback position with color)
+    if (progress) {
+        const progressPercent = Math.min(currentPercent, endPercent);
+        progress.style.left = startPercent + '%';
+        progress.style.width = Math.max(0, progressPercent - startPercent) + '%';
+    }
+
+    // Update trim handles (both use left positioning with translateX(-50%))
+    if (startHandle) startHandle.style.left = startPercent + '%';
+    if (endHandle) endHandle.style.left = endPercent + '%';
+
+    // Update time displays
+    if (startTime) startTime.textContent = formatDuration(trimStart);
+    if (endTime) endTime.textContent = formatDuration(trimEnd);
+    if (currentTimeEl) currentTimeEl.textContent = formatDuration(video.currentTime);
+    if (trimStartDisplay) trimStartDisplay.textContent = formatDuration(trimStart);
+    if (trimEndDisplay) trimEndDisplay.textContent = formatDuration(trimEnd);
+}
+
+// Setup timeline interactions (drag, click, play/pause)
+function setupTimelineInteractions() {
+    const video = document.getElementById('videoPreview');
+    const timeline = document.getElementById('timelineContainer');
+    const startHandle = document.getElementById('trimHandleStart');
+    const endHandle = document.getElementById('trimHandleEnd');
+    const playPauseBtn = document.getElementById('playPauseBtn');
+
+    if (!video || !timeline) return;
+
+    // Play/Pause button
+    if (playPauseBtn) {
+        playPauseBtn.onclick = () => {
+            if (video.paused) {
+                // Start from trim start if outside range
+                if (video.currentTime < trimStart || video.currentTime >= trimEnd) {
+                    video.currentTime = trimStart;
+                }
+                video.play();
+            } else {
+                video.pause();
+            }
+        };
+    }
+
+    // Update play/pause icon
+    video.onplay = () => updatePlayPauseIcon(false);
+    video.onpause = () => updatePlayPauseIcon(true);
+
+    // Update timeline during playback
+    video.ontimeupdate = () => {
+        updateTimelineUI();
+        // Stop at trim end
+        if (video.currentTime >= trimEnd) {
+            video.pause();
+            video.currentTime = trimStart;
+        }
+    };
+
+    // Click on timeline to seek
+    timeline.addEventListener('mousedown', (e) => {
+        if (e.target.closest('.trim-handle')) return; // Don't seek if clicking handle
+        isDraggingTimeline = true;
+        seekToPosition(e);
+    });
+
+    // Trim handle dragging
+    if (startHandle) {
+        startHandle.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            isDraggingTrimStart = true;
+        });
+    }
+
+    if (endHandle) {
+        endHandle.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            isDraggingTrimEnd = true;
+        });
+    }
+
+    // Global mouse move/up for dragging
+    document.addEventListener('mousemove', onTimelineMouseMove);
+    document.addEventListener('mouseup', onTimelineMouseUp);
+
+    // Touch support
+    timeline.addEventListener('touchstart', (e) => {
+        if (e.target.closest('.trim-handle-start')) {
+            isDraggingTrimStart = true;
+        } else if (e.target.closest('.trim-handle-end')) {
+            isDraggingTrimEnd = true;
+        } else {
+            isDraggingTimeline = true;
+            seekToPosition(e.touches[0]);
+        }
+    });
+
+    document.addEventListener('touchmove', (e) => {
+        if (isDraggingTrimStart || isDraggingTrimEnd || isDraggingTimeline) {
+            onTimelineMouseMove(e.touches[0]);
+        }
+    });
+
+    document.addEventListener('touchend', onTimelineMouseUp);
+}
+
+function onTimelineMouseMove(e) {
+    if (!isDraggingTrimStart && !isDraggingTrimEnd && !isDraggingTimeline) return;
+
+    const timeline = document.getElementById('timelineContainer');
+    const video = document.getElementById('videoPreview');
+    if (!timeline || !video) return;
+
+    const rect = timeline.getBoundingClientRect();
+    const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    const time = percent * originalVideoDuration;
+
+    if (isDraggingTrimStart) {
+        trimStart = Math.min(time, trimEnd - 0.1);
+        trimStart = Math.max(0, trimStart);
+        updateTimelineUI();
+        updateOutputDuration();
+    } else if (isDraggingTrimEnd) {
+        trimEnd = Math.max(time, trimStart + 0.1);
+        trimEnd = Math.min(originalVideoDuration, trimEnd);
+        updateTimelineUI();
+        updateOutputDuration();
+    } else if (isDraggingTimeline) {
+        seekToPosition(e);
+    }
+}
+
+function onTimelineMouseUp() {
+    isDraggingTrimStart = false;
+    isDraggingTrimEnd = false;
+    isDraggingTimeline = false;
+}
+
+function seekToPosition(e) {
+    const timeline = document.getElementById('timelineContainer');
+    const video = document.getElementById('videoPreview');
+    if (!timeline || !video) return;
+
+    const rect = timeline.getBoundingClientRect();
+    const percent = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    let time = percent * originalVideoDuration;
+
+    // Clamp to trim range
+    time = Math.max(trimStart, Math.min(trimEnd, time));
+    video.currentTime = time;
+    updateTimelineUI();
+}
+
+function updatePlayPauseIcon(showPlay) {
+    const playIcon = document.querySelector('.play-icon');
+    const pauseIcon = document.querySelector('.pause-icon');
+    if (playIcon) playIcon.style.display = showPlay ? 'block' : 'none';
+    if (pauseIcon) pauseIcon.style.display = showPlay ? 'none' : 'block';
+}
+
+// Calculate and update output duration display
+function updateOutputDuration() {
+    const outputDurationEl = document.getElementById('outputDuration');
+    const rawDuration = trimEnd - trimStart;
+    const outputDuration = rawDuration / playbackSpeed + (extendLastFrame ? 10 : 0);
+
+    if (outputDurationEl) outputDurationEl.textContent = formatDuration(outputDuration);
+
+    // Update trim displays
+    const trimStartDisplay = document.getElementById('trimStartDisplay');
+    const trimEndDisplay = document.getElementById('trimEndDisplay');
+    if (trimStartDisplay) trimStartDisplay.textContent = formatDuration(trimStart);
+    if (trimEndDisplay) trimEndDisplay.textContent = formatDuration(trimEnd);
+
+    // Validate and show/hide warning
+    validateEditParams();
+}
+
+// Validate edit parameters and show warnings
+function validateEditParams() {
+    const rawDuration = trimEnd - trimStart;
+    const outputDuration = rawDuration / playbackSpeed + (extendLastFrame ? 10 : 0);
+
+    const editWarning = document.getElementById('editWarning');
+    const editWarningText = document.getElementById('editWarningText');
+    const confirmBtn = document.getElementById('confirmPreset');
+
+    let error = null;
+
+    if (trimEnd <= trimStart) {
+        error = 'End time must be greater than start time';
+    } else if (outputDuration < EDIT_LIMITS.MIN_DURATION) {
+        error = `Output duration must be at least ${EDIT_LIMITS.MIN_DURATION} seconds (currently ${formatDuration(outputDuration)})`;
+    } else if (outputDuration > EDIT_LIMITS.MAX_DURATION) {
+        error = `Output duration cannot exceed ${EDIT_LIMITS.MAX_DURATION} seconds / 3 minutes (currently ${formatDuration(outputDuration)})`;
+    }
+
+    if (error) {
+        editWarning.style.display = 'flex';
+        editWarningText.textContent = error;
+        confirmBtn.disabled = true;
+        confirmBtn.style.opacity = '0.5';
+        return { valid: false, error };
+    } else {
+        editWarning.style.display = 'none';
+        confirmBtn.disabled = false;
+        confirmBtn.style.opacity = '1';
+        return { valid: true };
+    }
+}
+
+// Get edit parameters for upload
+function getEditParams() {
+    // Always return edit params if video is loaded
+    if (originalVideoDuration <= 0) {
+        return null;
+    }
+
+    return {
+        trimStart: trimStart,
+        trimEnd: trimEnd,
+        speed: playbackSpeed,
+        extendLastFrame: extendLastFrame
+    };
+}
+
+// Setup video editing event listeners
+function setupVideoEditingListeners() {
+    // Speed dropdown - also applies to video preview playback
+    const speedSelect = document.getElementById('speedSelect');
+    if (speedSelect) {
+        speedSelect.addEventListener('change', (e) => {
+            playbackSpeed = parseFloat(e.target.value);
+            // Apply speed to video preview in real-time
+            const video = document.getElementById('videoPreview');
+            if (video) video.playbackRate = playbackSpeed;
+            updateOutputDuration();
+        });
+    }
+
+    // Extend last frame checkbox
+    const extendCheckbox = document.getElementById('extendLastFrame');
+    if (extendCheckbox) {
+        extendCheckbox.addEventListener('change', (e) => {
+            extendLastFrame = e.target.checked;
+            updateOutputDuration();
+        });
+    }
+}
+
+// Reset video editing state and UI
+function resetVideoEditing() {
+    // Reset state
+    if (videoPreviewUrl) {
+        URL.revokeObjectURL(videoPreviewUrl);
+        videoPreviewUrl = null;
+    }
+    originalVideoDuration = 0;
+    trimStart = 0;
+    trimEnd = 0;
+    playbackSpeed = 1.0;
+    extendLastFrame = false;
+    isDraggingTrimStart = false;
+    isDraggingTrimEnd = false;
+    isDraggingTimeline = false;
+
+    // Reset video element
+    const videoPreview = document.getElementById('videoPreview');
+    if (videoPreview) {
+        videoPreview.src = '';
+        videoPreview.playbackRate = 1.0;
+        videoPreview.onplay = null;
+        videoPreview.onpause = null;
+        videoPreview.ontimeupdate = null;
+    }
+
+    // Reset time displays
+    const currentTime = document.getElementById('currentTime');
+    const totalTime = document.getElementById('totalTime');
+    const outputDuration = document.getElementById('outputDuration');
+    const trimStartDisplay = document.getElementById('trimStartDisplay');
+    const trimEndDisplay = document.getElementById('trimEndDisplay');
+    const trimStartTime = document.getElementById('trimStartTime');
+    const trimEndTime = document.getElementById('trimEndTime');
+
+    if (currentTime) currentTime.textContent = '0:00';
+    if (totalTime) totalTime.textContent = '0:00';
+    if (outputDuration) outputDuration.textContent = '0:00';
+    if (trimStartDisplay) trimStartDisplay.textContent = '0:00';
+    if (trimEndDisplay) trimEndDisplay.textContent = '0:00';
+    if (trimStartTime) trimStartTime.textContent = '0:00';
+    if (trimEndTime) trimEndTime.textContent = '0:00';
+
+    // Reset timeline elements
+    const trimRange = document.getElementById('timelineTrimRange');
+    const progress = document.getElementById('timelineProgress');
+    const startHandle = document.getElementById('trimHandleStart');
+    const endHandle = document.getElementById('trimHandleEnd');
+
+    if (trimRange) {
+        trimRange.style.left = '0%';
+        trimRange.style.width = '100%';
+    }
+    if (progress) progress.style.width = '0';
+    if (startHandle) startHandle.style.left = '0';
+    if (endHandle) endHandle.style.left = '100%';
+
+    // Reset play/pause icon
+    updatePlayPauseIcon(true);
+
+    // Reset speed dropdown
+    const speedSelect = document.getElementById('speedSelect');
+    if (speedSelect) speedSelect.value = '1';
+
+    // Reset extend checkbox
+    const extendCheckbox = document.getElementById('extendLastFrame');
+    if (extendCheckbox) extendCheckbox.checked = false;
+
+    // Hide warning
+    const editWarning = document.getElementById('editWarning');
+    if (editWarning) editWarning.style.display = 'none';
+
+    // Re-enable confirm button
+    const confirmBtn = document.getElementById('confirmPreset');
+    if (confirmBtn) {
+        confirmBtn.disabled = false;
+        confirmBtn.style.opacity = '1';
+    }
+}
+
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
     setupUploadZone();
     setupRefreshButton();
-    setupFilters();
+    setupFilterButtons();
+    setupVideoEditingListeners();
     loadCameras();
 });
 
@@ -56,7 +511,7 @@ function updateFilters(cameras) {
     const availableTypes = new Set();
 
     cameras.forEach(camera => {
-        const preset = (camera.preset || 'unknown').toLowerCase();
+        const preset = derivePresetLabel(camera);
         availablePresets.add(preset);
 
         const isBatch = !!camera.shared_video_id;
@@ -107,12 +562,11 @@ function updatePresetButtons(availablePresets) {
 
     // Preset display names
     const presetNames = {
-        '480p': '480p',
-        '720p': '720p',
-        '1080p': '1080p',
-        '4k': '4K',
         '5k': '5K',
-        'custom': 'Custom',
+        '4k': '4K',
+        '2k': '2K',
+        '1080p': '1080p',
+        '720p': '720p',
         'unknown': 'Unknown'
     };
 
@@ -120,7 +574,7 @@ function updatePresetButtons(availablePresets) {
     const allIsActive = currentActive === 'all' ? 'active' : '';
     let buttonsHTML = `<button class="filter-btn ${allIsActive}" data-filter-type="preset" data-filter-value="all">All</button>`;
 
-    ['480p', '720p', '1080p', '4k', '5k', 'custom', 'unknown'].forEach(preset => {
+    ['5k', '4k', '2k', '1080p', '720p', 'unknown'].forEach(preset => {
         if (availablePresets.has(preset)) {
             const isActive = currentActive === preset ? 'active' : '';
             buttonsHTML += `<button class="filter-btn ${isActive}" data-filter-type="preset" data-filter-value="${preset}">${presetNames[preset]}</button>`;
@@ -201,11 +655,6 @@ function setupFilterButtons() {
     });
 }
 
-// Setup Filters (Initial setup - now just calls setupFilterButtons)
-function setupFilters() {
-    setupFilterButtons();
-}
-
 // Refresh Button Setup
 function setupRefreshButton() {
     const refreshBtn = document.getElementById('refreshBtn');
@@ -265,20 +714,21 @@ function setupUploadZone() {
 
     // Modal confirm button
     confirmPresetBtn.addEventListener('click', () => {
-        const preset = document.querySelector('input[name="preset"]:checked').value;
+        const selectedPreset = document.querySelector('input[name="preset"]:checked').value;
         const cameraCountOption = document.querySelector('input[name="cameraCount"]:checked').value;
         const subProfile = document.getElementById('subProfile').checked;
+        const cameraName = document.getElementById('cameraName').value.trim() || 'MockONVIF';
 
         let cameraCount;
         if (cameraCountOption === 'batch') {
             // Get the batch camera count from input and validate
             let batchCount = parseInt(document.getElementById('batchCameraCount').value);
 
-            // Validate and clamp between 2-50
+            // Validate and clamp between 2-100
             if (isNaN(batchCount) || batchCount < 2) {
                 batchCount = 2;
-            } else if (batchCount > 50) {
-                batchCount = 50;
+            } else if (batchCount > 100) {
+                batchCount = 100;
             }
 
             // Update the input field with the clamped value
@@ -288,8 +738,27 @@ function setupUploadZone() {
             cameraCount = parseInt(cameraCountOption);
         }
 
+        // Get video parameters based on selected preset or custom
+        let videoParams;
+        if (selectedPreset === 'custom') {
+            // Use custom parameters from form
+            videoParams = {
+                width: parseInt(document.getElementById('customWidth').value),
+                height: parseInt(document.getElementById('customHeight').value),
+                fps: parseFloat(document.getElementById('customFps').value),
+                videoBitrate: parseFloat(document.getElementById('customVideoBitrate').value),
+                audioBitrate: document.getElementById('customAudioBitrate').value
+            };
+        } else {
+            // Use pre-calculated parameters for the selected preset
+            videoParams = window.calculatedPresets[selectedPreset];
+        }
+
+        // Get edit params BEFORE hiding modal (which resets the state)
+        const editParams = getEditParams();
+
         hidePresetModal();
-        uploadVideo(pendingFile, preset, cameraCount, subProfile);
+        uploadVideo(pendingFile, videoParams, cameraCount, subProfile, cameraName, editParams);
         pendingFile = null;
     });
 
@@ -313,17 +782,6 @@ function setupUploadZone() {
                 if (subProfileCheckbox) {
                     subProfileCheckbox.checked = false;
                     subProfileCheckbox.disabled = true;
-
-                    // Also re-enable 480p option if it was disabled
-                    const p480Option = document.querySelector('input[name="preset"][value="480p"]');
-                    const p480Label = p480Option?.closest('.preset-option');
-                    if (p480Option) {
-                        p480Option.disabled = false;
-                        if (p480Label) {
-                            p480Label.style.opacity = '1';
-                            p480Label.style.cursor = 'pointer';
-                        }
-                    }
                 }
             } else if (radio.value === '1' && radio.checked) {
                 // Re-enable sub-profile for single camera
@@ -354,11 +812,11 @@ function setupUploadZone() {
         batchCameraCountInput.addEventListener('blur', (e) => {
             let value = parseInt(e.target.value);
 
-            // Validate and clamp between 2-50
+            // Validate and clamp between 2-100
             if (isNaN(value) || value < 2) {
                 value = 2;
-            } else if (value > 50) {
-                value = 50;
+            } else if (value > 100) {
+                value = 100;
             }
 
             e.target.value = value;
@@ -374,177 +832,160 @@ function setupUploadZone() {
         });
     }
 
-    // Sub-profile checkbox handler
-    if (subProfileCheckbox) {
-        subProfileCheckbox.addEventListener('change', (e) => {
-            const isChecked = e.target.checked;
-            const p480Option = document.querySelector('input[name="preset"][value="480p"]');
-            const p480Label = p480Option?.closest('.preset-option');
+    // Sub-profile checkbox handler (360p sub-profile doesn't conflict with any main preset)
+}
 
-            if (isChecked) {
-                // Disable 480p option
-                if (p480Option) {
-                    p480Option.disabled = true;
-                    if (p480Label) {
-                        p480Label.style.opacity = '0.5';
-                        p480Label.style.cursor = 'not-allowed';
-                    }
 
-                    // If 480p is currently selected, auto-switch to 720p
-                    if (p480Option.checked) {
-                        const p720Option = document.querySelector('input[name="preset"][value="720p"]');
-                        if (p720Option) {
-                            p720Option.checked = true;
-                            updateUpscaleWarning();
-                            toggleCustomParamsSection();
-                        }
-                    }
-                }
-            } else {
-                // Re-enable 480p option
-                if (p480Option) {
-                    p480Option.disabled = false;
-                    if (p480Label) {
-                        p480Label.style.opacity = '1';
-                        p480Label.style.cursor = 'pointer';
-                    }
-                }
-            }
-        });
+// Calculate dimensions for a preset based on aspect ratio and original video
+// Returns dimensions that maintain aspect ratio while targeting preset resolution
+function calculatePresetDimensions(presetName, originalPreset, targetHeight, aspectRatio, originalPixels, resolution) {
+    // Keep original dimensions for the matching preset level
+    if (presetName === originalPreset) {
+        return { width: resolution.width, height: resolution.height };
     }
+
+    // Calculate scaled dimensions (ensure even numbers for FFmpeg compatibility)
+    const scaledWidth = Math.round(targetHeight * aspectRatio / 2) * 2;
+    const scaledHeight = targetHeight;
+    const scaledPixels = scaledWidth * scaledHeight;
+
+    // For upscale presets, calculate from preset's pixel threshold to maintain quality
+    if (scaledPixels <= originalPixels) {
+        const targetPixels = PRESET_PIXELS[presetName];
+        const height = Math.round(Math.sqrt(targetPixels / aspectRatio) / 2) * 2;
+        const width = Math.round(height * aspectRatio / 2) * 2;
+        return { width, height };
+    }
+
+    return { width: scaledWidth, height: scaledHeight };
+}
+
+// Update the preset description text in the modal UI
+function updatePresetDescriptionUI(presetName, width, height, fps, videoBitrate) {
+    const presetOption = document.querySelector(`input[value="${presetName}"]`);
+    if (!presetOption) return;
+
+    const card = presetOption.closest('.preset-option').querySelector('.preset-card');
+    const desc = card?.querySelector('.preset-desc');
+    if (desc) {
+        desc.textContent = `${width}x${height} @ ${fps}fps \u00B7 ${videoBitrate} Mbps`;
+    }
+}
+
+// Update visual markers on preset options (upscale warning, original badge)
+function updatePresetOptionMarkers(originalPixels, selectedPreset) {
+    document.querySelectorAll('.preset-option').forEach(option => {
+        const input = option.querySelector('input[type="radio"]');
+        const card = option.querySelector('.preset-card');
+        const preset = input.value;
+
+        // Clear previous markers
+        card.classList.remove('upscale-option', 'original-option');
+        card.removeAttribute('data-upscale');
+        const originalBadge = card.querySelector('.original-badge');
+        if (originalBadge) originalBadge.style.display = 'none';
+
+        // Skip custom preset
+        if (preset === 'custom') return;
+
+        // Apply markers based on pixel comparison
+        const targetPixels = PRESET_PIXELS[preset];
+        if (targetPixels > originalPixels) {
+            card.classList.add('upscale-option');
+            card.setAttribute('data-upscale', 'true');
+        } else if (preset === selectedPreset) {
+            card.classList.add('original-option');
+            if (originalBadge) originalBadge.style.display = 'inline-block';
+        }
+
+        // Ensure all options are enabled
+        input.disabled = false;
+        option.style.opacity = '1';
+        option.style.cursor = 'pointer';
+    });
 }
 
 // Detect video resolution and show modal with appropriate options
 async function detectVideoResolutionAndShowModal(file) {
     try {
         const resolution = await getVideoResolution(file);
-        const maxHeight = resolution.height;
+        const originalPixels = resolution.width * resolution.height;
 
-        // Store resolution for custom params
+        // Calculate aspect ratio from original video
+        const aspectRatio = resolution.width / resolution.height;
+
+        // Store resolution and aspect ratio for later use
         window.originalVideoResolution = resolution;
+        window.videoAspectRatio = aspectRatio;
 
-        // Update modal with detected resolution
+        // Update modal with detected resolution (and FPS if available)
         const originalResolution = document.getElementById('originalResolution');
         if (originalResolution) {
-            originalResolution.textContent = `${resolution.width}x${resolution.height}`;
+            let resolutionText = `${resolution.width}x${resolution.height}`;
+            if (resolution.fps) {
+                resolutionText += ` @ ${resolution.fps}fps`;
+            }
+            originalResolution.textContent = resolutionText;
         }
 
-        // Preset heights mapping
-        const presets = {
-            '480p': 480,
-            '720p': 720,
-            '1080p': 1080,
-            '4k': 2160,
-            '5k': 2880
+        // Determine the original video's preset level first
+        const originalPreset = getPresetFromPixels(originalPixels);
+
+        // Preset configuration with base heights and other parameters
+        const presetConfigs = {
+            '720p': { height: 720, fps: 30, videoBitrate: 2.5, audioBitrate: '128k' },
+            '1080p': { height: 1080, fps: 30, videoBitrate: 4.0, audioBitrate: '128k' },
+            '2k': { height: 1512, fps: 30, videoBitrate: 8.0, audioBitrate: '128k' },
+            '4k': { height: 2160, fps: 30, videoBitrate: 15.0, audioBitrate: '128k' },
+            '5k': { height: 2880, fps: 24, videoBitrate: 25.0, audioBitrate: '128k' }
         };
 
-        // Determine recommended preset (closest match to original)
-        let selectedPreset = '480p';
-        if (maxHeight >= 2880) selectedPreset = '5k';
-        else if (maxHeight >= 2160) selectedPreset = '4k';
-        else if (maxHeight >= 1080) selectedPreset = '1080p';
-        else if (maxHeight >= 720) selectedPreset = '720p';
+        // Calculate dynamic parameters for each preset based on aspect ratio
+        window.calculatedPresets = {};
+        Object.keys(presetConfigs).forEach(presetName => {
+            const config = presetConfigs[presetName];
+            const { width: finalWidth, height: finalHeight } = calculatePresetDimensions(
+                presetName, originalPreset, config.height, aspectRatio, originalPixels, resolution
+            );
 
-        // Update all preset options with visual markers
-        document.querySelectorAll('.preset-option').forEach(option => {
-            const input = option.querySelector('input[type="radio"]');
-            const card = option.querySelector('.preset-card');
-            const preset = input.value;
-            const targetHeight = presets[preset];
+            window.calculatedPresets[presetName] = {
+                width: finalWidth,
+                height: finalHeight,
+                fps: config.fps,
+                videoBitrate: config.videoBitrate,
+                audioBitrate: config.audioBitrate
+            };
 
-            // Clear all previous markers
-            card.classList.remove('upscale-option', 'recommended-option');
-            card.removeAttribute('data-upscale');
-            const recommendedBadge = card.querySelector('.recommended-badge');
-            const upscaleBadge = card.querySelector('.upscale-badge');
-            if (recommendedBadge) recommendedBadge.style.display = 'none';
-            if (upscaleBadge) upscaleBadge.style.display = 'none';
-
-            // Skip custom preset for markers
-            if (preset === 'custom') {
-                return;
-            }
-
-            // Apply new markers
-            if (targetHeight > maxHeight) {
-                // Upscale option - show warning badge
-                card.classList.add('upscale-option');
-                card.setAttribute('data-upscale', 'true');
-                if (upscaleBadge) upscaleBadge.style.display = 'inline-block';
-            } else if (preset === selectedPreset) {
-                // Recommended option - show recommended badge
-                card.classList.add('recommended-option');
-                if (recommendedBadge) recommendedBadge.style.display = 'inline-block';
-            }
-
-            // Keep all options enabled
-            input.disabled = false;
-            option.style.opacity = '1';
-            option.style.cursor = 'pointer';
+            updatePresetDescriptionUI(presetName, finalWidth, finalHeight, config.fps, config.videoBitrate);
         });
 
-        // Auto-select the recommended preset
-        document.querySelector(`input[value="${selectedPreset}"]`).checked = true;
+        // Update visual markers and auto-select the recommended preset
+        updatePresetOptionMarkers(originalPixels, originalPreset);
+        document.querySelector(`input[value="${originalPreset}"]`).checked = true;
 
-        // Populate custom defaults with original resolution
         populateCustomDefaults(resolution);
-
-        // Setup radio change listeners for warning message and custom params
         setupPresetChangeListeners();
-
-        // Check initial selection and show/hide warning
         updateUpscaleWarning();
-
-        // Toggle custom params section based on initial selection
         toggleCustomParamsSection();
 
-        // Check sub-profile checkbox state and update 480p option accordingly
-        checkAndApplySubProfileState();
+        // Setup video preview for editing
+        setupVideoPreview(file);
 
         showPresetModal();
     } catch (error) {
         console.error('Failed to detect video resolution:', error);
-        // If detection fails, show modal with all options enabled
         const originalResolution = document.getElementById('originalResolution');
         if (originalResolution) {
             originalResolution.textContent = 'Unknown';
         }
-        // Set default resolution for custom params
         populateCustomDefaults({ width: 1920, height: 1080 });
-        // Setup listeners and hide custom params by default
         setupPresetChangeListeners();
         toggleCustomParamsSection();
 
-        // Check sub-profile checkbox state and update 480p option accordingly
-        checkAndApplySubProfileState();
+        // Setup video preview even on error
+        setupVideoPreview(file);
 
         showPresetModal();
-    }
-}
-
-// Check and apply sub-profile checkbox state to 480p option
-function checkAndApplySubProfileState() {
-    const subProfileCheckbox = document.getElementById('subProfile');
-    const p480Option = document.querySelector('input[name="preset"][value="480p"]');
-    const p480Label = p480Option?.closest('.preset-option');
-
-    if (subProfileCheckbox && subProfileCheckbox.checked && p480Option) {
-        // Disable 480p if sub-profile is checked
-        p480Option.disabled = true;
-        if (p480Label) {
-            p480Label.style.opacity = '0.5';
-            p480Label.style.cursor = 'not-allowed';
-        }
-
-        // If 480p is currently selected, auto-switch to 720p
-        if (p480Option.checked) {
-            const p720Option = document.querySelector('input[name="preset"][value="720p"]');
-            if (p720Option) {
-                p720Option.checked = true;
-                updateUpscaleWarning();
-                toggleCustomParamsSection();
-            }
-        }
     }
 }
 
@@ -558,11 +999,14 @@ function populateCustomDefaults(resolution) {
 
     if (widthInput) widthInput.value = resolution.width;
     if (heightInput) heightInput.value = resolution.height;
-    if (fpsInput) fpsInput.value = 30;
-    if (fpsSlider) fpsSlider.value = 30;
 
-    // Calculate and set suggested bitrate
-    const suggestedBitrate = calculateSuggestedBitrate(resolution.width, resolution.height, 30);
+    // Use detected FPS if available, otherwise default to 30
+    const fps = resolution.fps || 30;
+    if (fpsInput) fpsInput.value = fps;
+    if (fpsSlider) fpsSlider.value = fps;
+
+    // Calculate and set suggested bitrate based on actual fps
+    const suggestedBitrate = calculateSuggestedBitrate(resolution.width, resolution.height, fps);
     if (videoBitrateInput) videoBitrateInput.value = suggestedBitrate.toFixed(1);
     updateSuggestedBitrate();
 }
@@ -578,7 +1022,7 @@ function calculateSuggestedBitrate(width, height, fps) {
 function updateSuggestedBitrate() {
     const width = parseInt(document.getElementById('customWidth').value) || 1920;
     const height = parseInt(document.getElementById('customHeight').value) || 1080;
-    const fps = parseInt(document.getElementById('customFps').value) || 30;
+    const fps = parseFloat(document.getElementById('customFps').value) || 30;
 
     const suggested = calculateSuggestedBitrate(width, height, fps);
     const suggestedElement = document.getElementById('suggestedBitrate');
@@ -622,7 +1066,7 @@ function setupPresetChangeListeners() {
 
     if (fpsInput) {
         fpsInput.addEventListener('input', (e) => {
-            const value = parseInt(e.target.value) || 30;
+            const value = parseFloat(e.target.value) || 30;
             if (fpsSlider) fpsSlider.value = value;
             updateSuggestedBitrate();
         });
@@ -652,7 +1096,7 @@ function toggleCustomParamsSection() {
     }
 }
 
-// Check if custom resolution is upscaling
+// Check if custom resolution is upscaling (based on total pixels)
 function checkCustomUpscale() {
     if (!window.originalVideoResolution) return;
 
@@ -660,11 +1104,14 @@ function checkCustomUpscale() {
     const height = parseInt(document.getElementById('customHeight').value) || 1080;
     const original = window.originalVideoResolution;
 
+    const customPixels = width * height;
+    const originalPixels = original.width * original.height;
+
     const warningDiv = document.getElementById('upscaleWarning');
     const selectedPreset = document.querySelector('input[name="preset"]:checked');
 
     if (warningDiv && selectedPreset && selectedPreset.value === 'custom') {
-        if (width > original.width || height > original.height) {
+        if (customPixels > originalPixels) {
             warningDiv.style.display = 'flex';
         } else {
             warningDiv.style.display = 'none';
@@ -691,17 +1138,81 @@ function getVideoResolution(file) {
     return new Promise((resolve, reject) => {
         const video = document.createElement('video');
         video.preload = 'metadata';
+        video.muted = true;
+
+        let resolved = false;
+
+        const resolveOnce = (result) => {
+            if (!resolved) {
+                resolved = true;
+                window.URL.revokeObjectURL(video.src);
+                video.pause();
+                video.remove();
+                resolve(result);
+            }
+        };
 
         video.onloadedmetadata = function () {
-            window.URL.revokeObjectURL(video.src);
-            resolve({
+            const result = {
                 width: video.videoWidth,
-                height: video.videoHeight
-            });
+                height: video.videoHeight,
+                duration: video.duration || null
+            };
+
+            // Try to estimate FPS using requestVideoFrameCallback (modern browsers)
+            if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+                let frameCount = 0;
+                let startTime = null;
+                const maxSampleTime = 0.3; // Sample for 0.3 seconds
+
+                // Set timeout to prevent hanging
+                const timeout = setTimeout(() => {
+                    resolveOnce(result);
+                }, 2000); // 2 second timeout
+
+                video.playbackRate = 2; // Speed up for faster sampling
+
+                const countFrame = (now, metadata) => {
+                    if (resolved) return;
+
+                    if (startTime === null) {
+                        startTime = metadata.mediaTime;
+                    }
+                    frameCount++;
+
+                    const elapsed = metadata.mediaTime - startTime;
+                    if (elapsed < maxSampleTime && video.currentTime < video.duration - 0.1) {
+                        video.requestVideoFrameCallback(countFrame);
+                    } else {
+                        clearTimeout(timeout);
+                        if (elapsed > 0 && frameCount > 1) {
+                            const estimatedFps = Math.round(frameCount / elapsed);
+                            // Validate FPS is reasonable (1-120)
+                            if (estimatedFps >= 1 && estimatedFps <= 120) {
+                                result.fps = estimatedFps;
+                            }
+                        }
+                        resolveOnce(result);
+                    }
+                };
+
+                video.requestVideoFrameCallback(countFrame);
+                video.play().catch(() => {
+                    clearTimeout(timeout);
+                    resolveOnce(result);
+                });
+            } else {
+                // Fallback for browsers without requestVideoFrameCallback
+                resolveOnce(result);
+            }
         };
 
         video.onerror = function () {
-            reject(new Error('Failed to load video metadata'));
+            if (!resolved) {
+                resolved = true;
+                window.URL.revokeObjectURL(video.src);
+                reject(new Error('Failed to load video metadata'));
+            }
         };
 
         video.src = URL.createObjectURL(file);
@@ -711,6 +1222,7 @@ function getVideoResolution(file) {
 // Show preset modal
 function showPresetModal() {
     presetModal.style.display = 'flex';
+    document.body.style.overflow = 'hidden';
 
     // Check camera count and apply sub-profile checkbox state
     const selectedCameraCount = document.querySelector('input[name="cameraCount"]:checked');
@@ -727,18 +1239,55 @@ function showPresetModal() {
 // Hide preset modal
 function hidePresetModal() {
     presetModal.style.display = 'none';
+    document.body.style.overflow = '';
     // Reset resolution text
     const originalResolution = document.getElementById('originalResolution');
     if (originalResolution) {
         originalResolution.textContent = 'Detecting...';
     }
+    // Reset custom parameters to default values
+    const customWidth = document.getElementById('customWidth');
+    const customHeight = document.getElementById('customHeight');
+    const customFps = document.getElementById('customFps');
+    const customFpsSlider = document.getElementById('customFpsSlider');
+    const customVideoBitrate = document.getElementById('customVideoBitrate');
+    const cameraNameInput = document.getElementById('cameraName');
+
+    if (customWidth) customWidth.value = 1920;
+    if (customHeight) customHeight.value = 1080;
+    if (customFps) customFps.value = 30;
+    if (customFpsSlider) customFpsSlider.value = 30;
+    if (customVideoBitrate) customVideoBitrate.value = '4.0';
+    if (cameraNameInput) cameraNameInput.value = '';
+
+    // Reset preset descriptions to default 16:9 values
+    const defaultDescriptions = {
+        '720p': '1280x720 @ 30fps · 2.5 Mbps',
+        '1080p': '1920x1080 @ 30fps · 4 Mbps',
+        '2k': '2688x1512 @ 30fps · 8 Mbps',
+        '4k': '3840x2160 @ 30fps · 15 Mbps',
+        '5k': '5120x2880 @ 24fps · 25 Mbps'
+    };
+    Object.keys(defaultDescriptions).forEach(presetKey => {
+        const presetOption = document.querySelector(`input[value="${presetKey}"]`);
+        if (presetOption) {
+            const card = presetOption.closest('.preset-option').querySelector('.preset-card');
+            const desc = card?.querySelector('.preset-desc');
+            if (desc) {
+                desc.textContent = defaultDescriptions[presetKey];
+            }
+        }
+    });
+
+    // Reset video editing state
+    resetVideoEditing();
 }
 
 // Validate custom parameters
 function validateCustomParams() {
     const width = parseInt(document.getElementById('customWidth').value);
     const height = parseInt(document.getElementById('customHeight').value);
-    const fps = parseInt(document.getElementById('customFps').value);
+    const fps = parseFloat(document.getElementById('customFps').value);
     const videoBitrate = parseFloat(document.getElementById('customVideoBitrate').value);
 
     const errors = [];
@@ -760,14 +1309,11 @@ function validateCustomParams() {
 }
 
 // Upload Video
-async function uploadVideo(file, preset = '1080p', cameraCount = 1, subProfile = false) {
-    // Validate custom parameters if preset is custom
-    if (preset === 'custom') {
-        const errors = validateCustomParams();
-        if (errors.length > 0) {
-            showToast(`Validation error: ${errors[0]}`, 'error');
-            return;
-        }
+async function uploadVideo(file, videoParams, cameraCount = 1, subProfile = false, cameraName = 'MockONVIF', editParams = null) {
+    // Validate parameters
+    if (!videoParams || !videoParams.width || !videoParams.height) {
+        showToast('Invalid video parameters', 'error');
+        return;
     }
 
     // Show progress
@@ -776,23 +1322,23 @@ async function uploadVideo(file, preset = '1080p', cameraCount = 1, subProfile =
 
     const formData = new FormData();
     formData.append('file', file);
-    formData.append('preset', preset);
     formData.append('camera_count', cameraCount);
     formData.append('sub_profile', subProfile);
+    formData.append('camera_name', cameraName);
 
-    // Add custom parameters if preset is custom
-    if (preset === 'custom') {
-        const width = document.getElementById('customWidth').value;
-        const height = document.getElementById('customHeight').value;
-        const fps = document.getElementById('customFps').value;
-        const videoBitrate = document.getElementById('customVideoBitrate').value + 'M';
-        const audioBitrate = document.getElementById('customAudioBitrate').value;
+    // Send specific video parameters (no more preset concept for backend)
+    formData.append('width', videoParams.width);
+    formData.append('height', videoParams.height);
+    formData.append('fps', videoParams.fps);
+    formData.append('video_bitrate', videoParams.videoBitrate + 'M');
+    formData.append('audio_bitrate', videoParams.audioBitrate);
 
-        formData.append('width', width);
-        formData.append('height', height);
-        formData.append('fps', fps);
-        formData.append('video_bitrate', videoBitrate);
-        formData.append('audio_bitrate', audioBitrate);
+    // Add video edit parameters (passed from caller before modal reset)
+    if (editParams) {
+        formData.append('trim_start', Math.floor(editParams.trimStart));
+        formData.append('trim_end', Math.floor(editParams.trimEnd));
+        formData.append('speed', editParams.speed);
+        formData.append('extend_last_frame', editParams.extendLastFrame);
     }
 
     try {
@@ -845,9 +1391,9 @@ async function loadCameras() {
 function renderCameras(cameras) {
     // Apply filters
     let filteredCameras = cameras.filter(camera => {
-        // Filter by preset
+        // Filter by preset (derived from resolution)
         if (filterState.preset !== 'all') {
-            const cameraPreset = (camera.preset || 'unknown').toLowerCase();
+            const cameraPreset = derivePresetLabel(camera);
             if (cameraPreset !== filterState.preset) {
                 return false;
             }
@@ -877,6 +1423,16 @@ function renderCameras(cameras) {
         }
 
         return true;
+    });
+
+    // Sort cameras by created_at (oldest first), then by onvif_port
+    filteredCameras.sort((a, b) => {
+        const timeA = a.created_at || 0;
+        const timeB = b.created_at || 0;
+        if (timeA !== timeB) {
+            return timeA - timeB;  // Oldest first
+        }
+        return (a.onvif_port || 0) - (b.onvif_port || 0);  // Then by port
     });
 
     // Update count with filtered results
@@ -960,8 +1516,8 @@ function createBatchCameraCard(cameras, sharedVideoId) {
     const minPort = sortedCameras[0].onvif_port;
     const maxPort = sortedCameras[sortedCameras.length - 1].onvif_port;
 
-    // Get preset from first camera
-    const preset = firstCamera.preset || 'unknown';
+    // Derive preset label from resolution
+    const preset = derivePresetLabel(firstCamera);
     let resolutionBadges = `<span class="preset-badge preset-${preset}">${preset.toUpperCase()}</span>`;
 
     // Add "+ Sub" badge if sub_profile enabled
@@ -980,6 +1536,10 @@ function createBatchCameraCard(cameras, sharedVideoId) {
             </div>
 
             <div class="camera-info">
+                <div class="info-row">
+                    <span class="info-label">NAME</span>
+                    <span class="info-value">${firstCamera.manufacturer || 'MockONVIF'}</span>
+                </div>
                 <div class="info-row">
                     <span class="info-label">ONVIF PORT</span>
                     <span class="info-value">${minPort} - ${maxPort}</span>
@@ -1025,7 +1585,7 @@ function createBatchCameraCard(cameras, sharedVideoId) {
 // Create Camera Card HTML
 function createCameraCard(camera) {
     const shortId = camera.id.substring(0, 8);
-    const preset = camera.preset || 'unknown';
+    const preset = derivePresetLabel(camera);
     const presetBadge = `<span class="preset-badge preset-${preset}">${preset.toUpperCase()}</span>`;
 
     // Build resolution display - include "+ Sub" if sub_profile enabled
@@ -1044,6 +1604,10 @@ function createCameraCard(camera) {
             </div>
 
             <div class="camera-info">
+                <div class="info-row">
+                    <span class="info-label">NAME</span>
+                    <span class="info-value">${camera.manufacturer || 'MockONVIF'}</span>
+                </div>
                 <div class="info-row">
                     <span class="info-label">ONVIF PORT</span>
                     <span class="info-value">${camera.onvif_port}</span>
@@ -1204,7 +1768,7 @@ function fallbackCopyToClipboard(text, type) {
 // Show Batch Cameras Modal
 function showBatchCamerasModal(batchId, cameras) {
     const shortBatchId = batchId.substring(0, 8);
-    const preset = cameras[0].preset || 'unknown';
+    const preset = derivePresetLabel(cameras[0]);
 
     // Sort cameras by onvif_port
     const sortedCameras = [...cameras].sort((a, b) => a.onvif_port - b.onvif_port);
@@ -1239,6 +1803,7 @@ function showBatchCamerasModal(batchId, cameras) {
 
     // Add to body
     document.body.insertAdjacentHTML('beforeend', modalHTML);
+    document.body.style.overflow = 'hidden';
 
     // Setup event listeners
     setupBatchModalEventListeners(cameras);
@@ -1247,9 +1812,6 @@ function showBatchCamerasModal(batchId, cameras) {
 // Create individual camera item for batch modal
 function createBatchCameraItem(camera, index) {
     const shortId = camera.id.substring(0, 8);
-
-    // Build resolution badges
-    const preset = camera.preset || 'unknown';
 
     return `
         <div class="batch-camera-item" data-camera-id="${camera.id}">
@@ -1301,12 +1863,14 @@ function setupBatchModalEventListeners(cameras) {
     const closeBtn = document.getElementById('closeBatchModal');
     closeBtn.addEventListener('click', () => {
         modal.remove();
+        document.body.style.overflow = '';
     });
 
     // Click outside to close
     modal.addEventListener('click', (e) => {
         if (e.target === modal) {
             modal.remove();
+            document.body.style.overflow = '';
         }
     });
 

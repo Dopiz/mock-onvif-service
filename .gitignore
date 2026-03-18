@@ -1,12 +1,5 @@
 # Runtime data - ignore actual content but keep directory structure
-data/videos/*
-data/cameras/*
-data/snapshots/*
-
-# Keep directory structure
-!data/videos/.gitkeep
-!data/cameras/.gitkeep
-!data/snapshots/.gitkeep
+data/*
 
 # Logs directory
 logs/

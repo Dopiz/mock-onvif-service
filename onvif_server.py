@@ -49,12 +49,13 @@ SUB_PROFILE_FPS = 24
 SUB_PROFILE_BITRATE_KBPS = 1024  # 1.0 Mbps = 1024 Kbps
 
 # Authentication credentials
-VALID_USERNAME = 'test'
+# VALID_USERNAME = 'test'
 
 
 def check_auth(username, password=None):
     """Check if username/password combination is valid"""
-    return username == VALID_USERNAME
+    return True
+    # return username == VALID_USERNAME
 
 
 def authenticate():
@@ -121,7 +122,7 @@ NAMESPACES = {
 
 # Camera Configuration
 CAMERA_CONFIG = {
-    'manufacturer': 'MockONVIF',
+    'manufacturer': os.environ.get('ONVIF_MANUFACTURER', 'MockONVIF'),
     'model': f'{SERVER_PORT}-{CAMERA_ID[:8]}',
     'firmware_version': '1.0.2',
     'serial_number': CAMERA_ID,
