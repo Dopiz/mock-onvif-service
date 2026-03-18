@@ -144,4 +144,3 @@ cleanup() {
 }
 
 trap cleanup EXIT
-

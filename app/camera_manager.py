@@ -11,11 +11,7 @@ from threading import Lock
 
 import yaml
 
-from app.constants import (
-    CUSTOM_PARAM_RANGES,
-    get_all_preset_names,
-    get_transcode_preset,
-)
+from app.constants import EXTEND_FRAME_DURATION
 from app.log_manager import LogManager
 from app.utils import get_server_ip, is_port_in_use
 
@@ -55,112 +51,227 @@ LOG_THREADS = {}
 PORT_ALLOCATION_LOCK = Lock()
 CAMERAS_DICT_LOCK = Lock()
 
-# Transcode presets - now managed in constants.py
-# Use get_transcode_preset() to retrieve preset configurations
-TRANSCODE_PRESETS = {name: get_transcode_preset(name) for name in get_all_preset_names()}
+
+def build_atempo_chain(speed):
+    """Build atempo filter chain for audio speed adjustment.
+
+    atempo only supports 0.5-2.0 range, so we chain multiple filters for higher/lower speeds.
+
+    Args:
+        speed: Target speed multiplier (e.g., 2.0 for 2x speed)
+
+    Returns:
+        list: List of atempo filter strings
+    """
+    if speed == 1.0:
+        return []
+
+    filters = []
+    remaining = speed
+
+    # For speeds > 2.0, chain multiple atempo=2.0
+    while remaining > 2.0:
+        filters.append("atempo=2.0")
+        remaining /= 2.0
+
+    # For speeds < 0.5, chain multiple atempo=0.5
+    while remaining < 0.5:
+        filters.append("atempo=0.5")
+        remaining /= 0.5
+
+    # Apply remaining adjustment if not 1.0
+    if abs(remaining - 1.0) > 0.001:
+        filters.append(f"atempo={remaining:.4f}")
+
+    return filters
+
+
+def apply_freeze_frame(video_path, duration=EXTEND_FRAME_DURATION):
+    """Apply freeze frame effect to the end of a video.
+
+    Runs a separate FFmpeg command to extend the last frame with tpad.
+    This is done separately to avoid filter chain conflicts.
+
+    Args:
+        video_path: Path to the video file
+        duration: Duration in seconds to freeze the last frame
+
+    Returns:
+        Path: Path to the processed video (same as input, modified in place)
+
+    Raises:
+        Exception: If FFmpeg fails
+    """
+    video_path = Path(video_path)
+    temp_path = video_path.with_suffix('.temp.mp4')
+
+    cmd = [
+        "ffmpeg",
+        "-i", str(video_path),
+        "-vf", f"tpad=stop_mode=clone:stop_duration={duration}",
+        "-af", f"apad=pad_dur={duration}",
+        "-c:v", "libx264",
+        "-profile:v", "baseline",
+        "-c:a", "aac",
+        "-y",
+        str(temp_path)
+    ]
+
+    try:
+        app_logger.info(f"Applying freeze frame ({duration}s) to: {video_path}")
+        app_logger.info(f"FFmpeg freeze command: {' '.join(cmd)}")
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            app_logger.error(f"FFmpeg freeze stderr: {result.stderr}")
+            raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
+
+        # Replace original with processed file
+        temp_path.replace(video_path)
+        app_logger.info(f"Freeze frame applied successfully: {video_path}")
+        return video_path
+    except subprocess.CalledProcessError as e:
+        # Clean up temp file on failure
+        if temp_path.exists():
+            temp_path.unlink()
+        app_logger.error(f"Failed to apply freeze frame: {e.stderr}")
+        raise Exception(f"Failed to apply freeze frame: {e.stderr}")
+
+
+def build_edit_description(trim_start, trim_duration, speed, extend_last_frame):
+    """Build a human-readable description of video edit operations for logging.
+
+    Args:
+        trim_start: Start time in seconds
+        trim_duration: Duration of trimmed segment (or None)
+        speed: Playback speed multiplier
+        extend_last_frame: Whether last frame extension is enabled
+
+    Returns:
+        str: Description string like " (trim:0-30s, speed:2x)" or empty string
+    """
+    parts = []
+    if trim_duration:
+        parts.append(f"trim:{trim_start}-{trim_start + trim_duration}s")
+    if speed != 1.0:
+        parts.append(f"speed:{speed}x")
+    if extend_last_frame:
+        parts.append(f"extend:+{EXTEND_FRAME_DURATION}s")
+    if parts:
+        return f" ({', '.join(parts)})"
+    return ""
 
 
 class CameraManager:
 
     @staticmethod
-    def _extract_onvif_params(preset, custom_params=None):
-        """Extract ONVIF parameters from preset or custom_params
+    def _extract_onvif_params(video_params):
+        """Extract ONVIF parameters from video_params
 
         Args:
-            preset: Preset name or 'custom'
-            custom_params: Custom parameters dict (required if preset='custom')
+            video_params: Video parameters dict {'width', 'height', 'fps', 'video_bitrate', 'audio_bitrate'}
 
         Returns:
             tuple: (width, height, fps, video_bitrate_kbps, audio_bitrate_kbps)
         """
-        if preset == 'custom' and custom_params:
-            # Extract from custom params
-            width = custom_params['width']
-            height = custom_params['height']
-            fps = custom_params['fps']
-            # Convert bitrate from '2.5M' format to Kbps
-            video_bitrate_kbps = int(float(custom_params['video_bitrate'].rstrip('M')) * 1024)
-            # Convert bitrate from '128k' format to Kbps integer
-            audio_bitrate_kbps = int(custom_params['audio_bitrate'].rstrip('k'))
-        else:
-            # Extract from preset config
-            from app.constants import get_onvif_preset
-            config = get_onvif_preset(preset)
-            width = config['width']
-            height = config['height']
-            fps = config['fps']
-            video_bitrate_kbps = config['bitrate']  # Already in Kbps
-            audio_bitrate_kbps = config['audio_bitrate']  # Already in Kbps
+        width = video_params['width']
+        height = video_params['height']
+        fps = video_params['fps']
+        # Convert bitrate from '2.5M' format to Kbps
+        video_bitrate_kbps = int(float(video_params['video_bitrate'].rstrip('M')) * 1024)
+        # Convert bitrate from '128k' format to Kbps integer
+        audio_bitrate_kbps = int(video_params['audio_bitrate'].rstrip('k'))
 
         return width, height, fps, video_bitrate_kbps, audio_bitrate_kbps
 
     @staticmethod
-    def transcode_video(input_path, output_path, preset='1080p', custom_params=None, sub_profile=False):
+    def transcode_video(input_path, output_path, video_params, sub_profile=False, edit_params=None):
         """Pre-transcode video to optimized format for low-CPU streaming
 
         Args:
             input_path: Path to original video file
             output_path: Path to save transcoded video (main stream)
-            preset: Quality preset ('480p', '720p', '1080p', '4k', '5k', 'custom')
-            custom_params: Custom parameters dict (required if preset='custom')
-                          {'width', 'height', 'fps', 'video_bitrate', 'audio_bitrate'}
+            video_params: Video parameters dict {'width', 'height', 'fps', 'video_bitrate', 'audio_bitrate'}
             sub_profile: If True, also generate a 480p sub-stream file
+            edit_params: Optional dict with edit parameters:
+                - trim_start: Start time in seconds
+                - trim_end: End time in seconds (None for no trim)
+                - speed: Playback speed multiplier (0.5-4.0)
+                - extend_last_frame: Boolean to add 10s freeze frame at end
 
         Returns:
             str or tuple: output_path if single profile, (output_path, output_path_sub) if sub_profile
 
         Raises:
-            Exception: If transcoding fails or invalid preset/params
+            Exception: If transcoding fails or invalid params
         """
-        if preset == 'custom':
-            if not custom_params:
-                raise Exception("Custom parameters required for 'custom' preset")
+        try:
+            width = int(video_params['width'])
+            height = int(video_params['height'])
+            fps = float(video_params['fps'])
+            video_bitrate = video_params['video_bitrate']  # e.g., '2.5M'
+            audio_bitrate = video_params['audio_bitrate']  # e.g., '128k'
 
-            # Validate custom parameters
-            try:
-                width = int(custom_params['width'])
-                height = int(custom_params['height'])
-                fps = float(custom_params['fps'])
-                video_bitrate = custom_params['video_bitrate']  # e.g., '2.5M'
-                audio_bitrate = custom_params['audio_bitrate']  # e.g., '128k'
+            preset_config = {
+                'resolution': f'{width}x{height}',
+                'fps': fps,
+                'video_bitrate': video_bitrate,
+                'video_maxrate': f"{float(video_bitrate.rstrip('M')) * 1.2}M",
+                'video_bufsize': f"{float(video_bitrate.rstrip('M')) * 2}M",
+                'gop': int(round(fps)),  # GOP must be integer, round fps value
+                'audio_bitrate': audio_bitrate,
+                'description': f'{width}x{height}'
+            }
+        except (KeyError, ValueError, TypeError) as e:
+            raise Exception(f"Invalid video parameters: {str(e)}")
 
-                # Validation ranges from constants
-                width_range = CUSTOM_PARAM_RANGES['width']
-                height_range = CUSTOM_PARAM_RANGES['height']
-                fps_range = CUSTOM_PARAM_RANGES['fps']
+        # Extract edit parameters
+        trim_start = 0
+        trim_duration = None
+        speed = 1.0
+        extend_last_frame = False
 
-                if not (width_range['min'] <= width <= width_range['max']):
-                    raise ValueError(f"Width must be between {width_range['min']} and {width_range['max']}")
-                if not (height_range['min'] <= height <= height_range['max']):
-                    raise ValueError(f"Height must be between {height_range['min']} and {height_range['max']}")
-                if not (fps_range['min'] <= fps <= fps_range['max']):
-                    raise ValueError(f"FPS must be between {fps_range['min']} and {fps_range['max']}")
+        if edit_params:
+            trim_start = edit_params.get('trim_start', 0)
+            trim_end = edit_params.get('trim_end')
+            speed = edit_params.get('speed', 1.0)
+            extend_last_frame = edit_params.get('extend_last_frame', False)
 
-                preset_config = {
-                    'resolution': f'{width}x{height}',
-                    'fps': fps,
-                    'video_bitrate': video_bitrate,
-                    'video_maxrate': f"{float(video_bitrate.rstrip('M')) * 1.2}M",
-                    'video_bufsize': f"{float(video_bitrate.rstrip('M')) * 2}M",
-                    'gop': int(round(fps)),  # GOP must be integer, round fps value
-                    'audio_bitrate': audio_bitrate,
-                    'description': f'Custom {width}x{height}'
-                }
-            except (KeyError, ValueError, TypeError) as e:
-                raise Exception(f"Invalid custom parameters: {str(e)}")
-        else:
-            if preset not in TRANSCODE_PRESETS:
-                raise Exception(f"Invalid preset: {preset}")
-            preset_config = TRANSCODE_PRESETS[preset]
+            if trim_end and trim_end > trim_start:
+                trim_duration = trim_end - trim_start
+
+        # Build video and audio filter chains (without freeze frame - handled separately)
+        video_filters = [f"scale={preset_config['resolution']}"]
+        audio_filters = []
+
+        # Speed adjustment
+        if speed != 1.0:
+            # Video: setpts=PTS/speed (e.g., 2x speed = setpts=0.5*PTS)
+            video_filters.append(f"setpts={1/speed}*PTS")
+            # Audio: atempo chain
+            audio_filters.extend(build_atempo_chain(speed))
+
+        # Build filter strings
+        vf_main = ','.join(video_filters)
+        af_main = ','.join(audio_filters) if audio_filters else None
+
+        # Build input options for trimming
+        input_opts = []
+        if trim_start > 0:
+            input_opts.extend(["-ss", str(trim_start)])
+        if trim_duration:
+            input_opts.extend(["-t", str(trim_duration)])
 
         if not sub_profile:
             # Single profile mode
-            cmd = [
-                "ffmpeg",
-                "-i", str(input_path),
+            cmd = ["ffmpeg"]
 
-                # Video encoding with preset configuration
-                "-vf", f"scale={preset_config['resolution']}",
+            # Add input options (trimming)
+            cmd.extend(input_opts)
+            cmd.extend(["-i", str(input_path)])
+
+            # Video encoding with preset configuration
+            cmd.extend([
+                "-vf", vf_main,
                 "-c:v", "libx264",
                 "-preset", "medium",
                 "-profile:v", "baseline",
@@ -173,37 +284,47 @@ class CameraManager:
                 "-keyint_min", str(preset_config['gop']),
                 "-sc_threshold", "0",
                 "-r", str(preset_config['fps']),
+            ])
 
-                # Audio encoding
+            # Audio encoding with optional filters
+            if af_main:
+                cmd.extend(["-af", af_main])
+            cmd.extend([
                 "-c:a", "aac",
                 "-b:a", preset_config['audio_bitrate'],
                 "-ar", "16000",
                 "-ac", "1",
                 "-profile:a", "aac_low",
+            ])
 
-                "-y",  # Overwrite if exists
-                str(output_path)
-            ]
+            cmd.extend(["-y", str(output_path)])
 
             try:
-                app_logger.info(f"Transcoding video with preset: {preset} ({preset_config['description']})")
-                subprocess.run(cmd, capture_output=True, check=True, text=True)
+                edit_desc = build_edit_description(trim_start, trim_duration, speed, extend_last_frame) if edit_params else ""
+                app_logger.info(f"Transcoding video: {preset_config['description']}{edit_desc}")
+                app_logger.info(f"FFmpeg command: {' '.join(cmd)}")
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    app_logger.error(f"FFmpeg stderr: {result.stderr}")
+                    raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
                 app_logger.info(f"Video transcoded successfully: {output_path}")
+
+                # Apply freeze frame in separate pass if requested
+                if extend_last_frame:
+                    apply_freeze_frame(output_path)
+
                 return output_path
             except subprocess.CalledProcessError as e:
                 app_logger.error(f"Failed to transcode video: {e.stderr}")
                 raise Exception(f"Failed to transcode video: {e.stderr}")
         else:
-            # Sub-profile mode: generate main stream + 480p sub-stream
-            preset_480p = get_transcode_preset('480p')
-            output_path_sub = Path(str(output_path).replace('.mp4', '_sub.mp4'))
-
-            cmd = [
-                "ffmpeg",
-                "-i", str(input_path),
-
-                # Output 1: Main stream with user-selected preset
-                "-vf", f"scale={preset_config['resolution']}",
+            # Sub-profile mode: first generate main stream, then downscale to 360p
+            # Step 1: Generate main profile (reuse single profile logic)
+            cmd = ["ffmpeg"]
+            cmd.extend(input_opts)
+            cmd.extend(["-i", str(input_path)])
+            cmd.extend([
+                "-vf", vf_main,
                 "-c:v", "libx264",
                 "-preset", "medium",
                 "-profile:v", "baseline",
@@ -216,6 +337,10 @@ class CameraManager:
                 "-keyint_min", str(preset_config['gop']),
                 "-sc_threshold", "0",
                 "-r", str(preset_config['fps']),
+            ])
+            if af_main:
+                cmd.extend(["-af", af_main])
+            cmd.extend([
                 "-c:a", "aac",
                 "-b:a", preset_config['audio_bitrate'],
                 "-ar", "16000",
@@ -223,35 +348,66 @@ class CameraManager:
                 "-profile:a", "aac_low",
                 "-y",
                 str(output_path),
-
-                # Output 2: 480p sub-stream
-                "-vf", f"scale={preset_480p['resolution']}",
-                "-c:v", "libx264",
-                "-preset", "medium",
-                "-profile:v", "baseline",
-                "-level", "3.1",
-                "-pix_fmt", "yuv420p",
-                "-b:v", preset_480p['video_bitrate'],
-                "-maxrate", preset_480p['video_maxrate'],
-                "-bufsize", preset_480p['video_bufsize'],
-                "-g", str(preset_480p['gop']),
-                "-keyint_min", str(preset_480p['gop']),
-                "-sc_threshold", "0",
-                "-r", str(preset_480p['fps']),
-                "-c:a", "aac",
-                "-b:a", preset_480p['audio_bitrate'],
-                "-ar", "16000",
-                "-ac", "1",
-                "-profile:a", "aac_low",
-                "-y",
-                str(output_path_sub)
-            ]
+            ])
 
             try:
-                app_logger.info(f"Transcoding video with sub-profile: {preset} + 480p")
-                subprocess.run(cmd, capture_output=True, check=True, text=True)
-                app_logger.info(f"Videos transcoded successfully: {output_path}, {output_path_sub}")
+                edit_desc = build_edit_description(trim_start, trim_duration, speed, extend_last_frame) if edit_params else ""
+                app_logger.info(f"Transcoding main profile: {preset_config['description']}{edit_desc}")
+                app_logger.info(f"FFmpeg command: {' '.join(cmd)}")
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    app_logger.error(f"FFmpeg stderr: {result.stderr}")
+                    raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
+
+                # Apply freeze frame to main profile if requested
+                if extend_last_frame:
+                    apply_freeze_frame(output_path)
+
+                app_logger.info(f"Main profile transcoded: {output_path}")
+
+                # Step 2: Downscale main profile to 360p sub-stream
+                aspect_ratio = width / height
+                sub_height = 360
+                dynamic_sub_width = int(round(sub_height * aspect_ratio / 2) * 2)
+                sub_resolution = f"{dynamic_sub_width}x{sub_height}"
+
+                output_path_sub = Path(str(output_path).replace('.mp4', '_sub.mp4'))
+
+                cmd_sub = [
+                    "ffmpeg",
+                    "-i", str(output_path),
+                    "-vf", f"scale={sub_resolution}",
+                    "-c:v", "libx264",
+                    "-preset", "medium",
+                    "-profile:v", "baseline",
+                    "-level", "3.1",
+                    "-pix_fmt", "yuv420p",
+                    "-b:v", "0.75M",
+                    "-maxrate", "1M",
+                    "-bufsize", "1.5M",
+                    "-g", "24",
+                    "-keyint_min", "24",
+                    "-sc_threshold", "0",
+                    "-r", "24",
+                    "-c:a", "aac",
+                    "-b:a", "64k",
+                    "-ar", "16000",
+                    "-ac", "1",
+                    "-profile:a", "aac_low",
+                    "-y",
+                    str(output_path_sub)
+                ]
+
+                app_logger.info(f"Generating 360p sub-profile: {sub_resolution}")
+                app_logger.info(f"FFmpeg command: {' '.join(cmd_sub)}")
+                result_sub = subprocess.run(cmd_sub, capture_output=True, text=True)
+                if result_sub.returncode != 0:
+                    app_logger.error(f"FFmpeg sub stderr: {result_sub.stderr}")
+                    raise subprocess.CalledProcessError(result_sub.returncode, cmd_sub, result_sub.stdout, result_sub.stderr)
+
+                app_logger.info(f"Sub-profile transcoded: {output_path_sub}")
                 return output_path, output_path_sub
+
             except subprocess.CalledProcessError as e:
                 app_logger.error(f"Failed to transcode video: {e.stderr}")
                 raise Exception(f"Failed to transcode video: {e.stderr}")
@@ -274,11 +430,12 @@ class CameraManager:
         snapshot_path = SNAPSHOTS_DIR / f"{camera_id}.jpg"
 
         # FFmpeg command to extract best frame using thumbnail filter
+        # Scale down to max 720p (1280x720) while maintaining aspect ratio, don't upscale
         cmd = [
             "ffmpeg",
             "-ss", "00:00:02",         # Skip first 2 seconds (avoid black screens/titles)
             "-i", str(video_path),
-            "-vf", "thumbnail=100",    # Analyze 100 frames and select the best one
+            "-vf", "thumbnail=100,scale='min(iw,1280)':'min(ih,720)':force_original_aspect_ratio=decrease",
             "-frames:v", "1",          # Extract 1 frame
             "-q:v", "2",               # High quality JPEG (2-5 is good, 2 is best)
             "-y",                      # Overwrite if exists
@@ -345,7 +502,7 @@ class CameraManager:
             camera_id: Camera ID for RTSP stream
 
         Returns:
-            tuple: (ffmpeg_pid, log_file_path)
+            int: FFmpeg process PID
 
         Raises:
             Exception: If FFmpeg fails to start
@@ -354,10 +511,10 @@ class CameraManager:
 
         # Create log file with rotation
         FFMPEG_LOGS_DIR.mkdir(parents=True, exist_ok=True)
-        ffmpeg_log = FFMPEG_LOGS_DIR / f"ffmpeg_{camera_id[:8]}.log"
+        log_file = FFMPEG_LOGS_DIR / f"ffmpeg_{camera_id[:8]}.log"
 
         # Create rotating logger (3MB max, 3 backups)
-        logger, handler = LogManager.create_rotating_logger(ffmpeg_log)
+        logger, _ = LogManager.create_rotating_logger(log_file)
 
         # Start FFmpeg process with logging
         ffmpeg_process = subprocess.Popen(
@@ -381,10 +538,10 @@ class CameraManager:
 
         app_logger.info(f"FFmpeg started for camera {camera_id[:8]} (PID: {ffmpeg_pid})")
 
-        return ffmpeg_pid, ffmpeg_log
+        return ffmpeg_pid
 
     @staticmethod
-    def start_onvif_server(camera_id, onvif_port, width, height, fps, video_bitrate_kbps, audio_bitrate_kbps, shared_video_id=None, sub_profile=False):
+    def start_onvif_server(camera_id, onvif_port, width, height, fps, video_bitrate_kbps, audio_bitrate_kbps, shared_video_id=None, sub_profile=False, camera_name='MockONVIF'):
         """Start ONVIF server instance for a camera
 
         Args:
@@ -397,6 +554,7 @@ class CameraManager:
             audio_bitrate_kbps: Audio bitrate in Kbps
             shared_video_id: Shared video ID (for batch cameras, used for snapshot)
             sub_profile: Enable sub-profile (480p) in ONVIF response
+            camera_name: Manufacturer name for the camera (default: 'MockONVIF')
 
         Returns:
             int: ONVIF server process PID
@@ -428,6 +586,7 @@ class CameraManager:
             'ONVIF_VIDEO_BITRATE_KBPS': str(video_bitrate_kbps),
             'ONVIF_AUDIO_BITRATE_KBPS': str(audio_bitrate_kbps),
             'ONVIF_SUB_PROFILE': 'true' if sub_profile else 'false',
+            'ONVIF_MANUFACTURER': camera_name,
         }
 
         # Add shared_video_id if provided (for batch cameras)
@@ -441,7 +600,7 @@ class CameraManager:
         log_file = ONVIF_LOGS_DIR / f"onvif_{camera_id[:8]}.log"
 
         # Create rotating logger (3MB max, 3 backups)
-        logger, handler = LogManager.create_rotating_logger(log_file)
+        logger, _ = LogManager.create_rotating_logger(log_file)
 
         # Start ONVIF server
         onvif_process = subprocess.Popen(
@@ -491,7 +650,7 @@ class CameraManager:
             # Use waitpid with -1 to reap any defunct child processes
             while True:
                 try:
-                    pid, status = os.waitpid(-1, os.WNOHANG)
+                    pid, _ = os.waitpid(-1, os.WNOHANG)
                     if pid == 0:
                         break  # No more defunct processes
                     app_logger.debug(f"Reaped defunct process (PID: {pid})")
@@ -525,17 +684,18 @@ class CameraManager:
         return list(CAMERAS.values())
 
     @staticmethod
-    def _create_single_camera_instance(camera_id, final_video_path, shared_video_id, preset, onvif_used_ports, skip_snapshot=False, custom_params=None, sub_profile=False):
+    def _create_single_camera_instance(camera_id, final_video_path, shared_video_id, video_params, onvif_used_ports, skip_snapshot=False, sub_profile=False, camera_name='MockONVIF'):
         """Create a single camera instance (used for parallel processing)
 
         Args:
             camera_id: Unique camera ID
             final_video_path: Path to the shared transcoded video
             shared_video_id: ID of the shared video file
-            preset: Quality preset
+            video_params: Video parameters dict {'width', 'height', 'fps', 'video_bitrate', 'audio_bitrate'}
             onvif_used_ports: Set of already allocated ports (thread-safe)
             skip_snapshot: If True, skip snapshot generation (use shared snapshot)
-            custom_params: Custom parameters dict (required if preset='custom')
+            sub_profile: Enable sub-profile (480p) stream
+            camera_name: Manufacturer name for the camera (default: 'MockONVIF')
 
         Returns:
             tuple: (camera_info dict, error message or None)
@@ -557,12 +717,12 @@ class CameraManager:
             # Start FFmpeg process (using the shared transcoded video)
             ffmpeg_pid_sub = None
             try:
-                ffmpeg_pid, ffmpeg_log = CameraManager.start_ffmpeg_process(final_video_path, camera_id)
+                ffmpeg_pid = CameraManager.start_ffmpeg_process(final_video_path, camera_id)
 
                 # Start second FFmpeg process for sub-stream if sub_profile enabled
                 if sub_profile:
                     final_video_path_sub = Path(str(final_video_path).replace('.mp4', '_sub.mp4'))
-                    ffmpeg_pid_sub, ffmpeg_log_sub = CameraManager.start_ffmpeg_process(
+                    ffmpeg_pid_sub = CameraManager.start_ffmpeg_process(
                         final_video_path_sub, f"{camera_id}_sub")
             except Exception as e:
                 if ffmpeg_pid:
@@ -574,19 +734,17 @@ class CameraManager:
 
             # Save config for reference
             config_path = CAMERAS_DIR / f"config_{camera_id}.yaml"
+            created_at = int(time.time())
             config = {
                 'camera_id': camera_id,
                 'rtsp_stream': f"rtsp://{MEDIAMTX_HOST}:{MEDIAMTX_RTSP_PORT}/{camera_id}",
                 'onvif_port': onvif_port,
-                'preset': preset,
+                'video_params': video_params,
                 'shared_video_id': shared_video_id,
                 'sub_profile': sub_profile,
-                'note': 'RTSP via mediamtx, ONVIF on dedicated port, using shared video'
+                'manufacturer': camera_name,
+                'created_at': created_at,
             }
-
-            # Save custom parameters if preset is custom
-            if preset == 'custom' and custom_params:
-                config['custom_params'] = custom_params
 
             try:
                 with open(config_path, 'w') as f:
@@ -597,10 +755,9 @@ class CameraManager:
 
             # Extract ONVIF parameters and start dedicated ONVIF server instance
             try:
-                width, height, fps, video_bitrate_kbps, audio_bitrate_kbps = CameraManager._extract_onvif_params(
-                    preset, custom_params)
+                width, height, fps, video_bitrate_kbps, audio_bitrate_kbps = CameraManager._extract_onvif_params(video_params)
                 onvif_pid = CameraManager.start_onvif_server(
-                    camera_id, onvif_port, width, height, fps, video_bitrate_kbps, audio_bitrate_kbps, shared_video_id, sub_profile)
+                    camera_id, onvif_port, width, height, fps, video_bitrate_kbps, audio_bitrate_kbps, shared_video_id, sub_profile, camera_name)
             except Exception as e:
                 os.kill(ffmpeg_pid, signal.SIGTERM)
                 if config_path.exists():
@@ -620,13 +777,14 @@ class CameraManager:
                 "onvif_url": f"{server_ip}:{onvif_port}",
                 "username": "test",
                 "password": "pass",
-                "preset": preset,
                 "shared_video_id": shared_video_id,
                 "width": width,
                 "height": height,
                 "fps": fps,
                 "video_bitrate_mbps": round(video_bitrate_kbps / 1000, 2),
-                "sub_profile": sub_profile
+                "sub_profile": sub_profile,
+                "manufacturer": camera_name,
+                "created_at": created_at
             }
 
             # Add sub-stream info if sub_profile enabled
@@ -644,7 +802,7 @@ class CameraManager:
             return None, f"Unexpected error: {str(e)}"
 
     @staticmethod
-    def create_cameras_batch(video_file, preset='1080p', count=50, custom_params=None, sub_profile=False):
+    def create_cameras_batch(video_file, video_params, count=50, sub_profile=False, camera_name='MockONVIF', edit_params=None):
         """Create multiple fake ONVIF cameras from a single uploaded video
 
         This method transcodes the video once and creates multiple camera instances
@@ -652,14 +810,16 @@ class CameraManager:
 
         Args:
             video_file: Uploaded video file
-            preset: Quality preset ('480p', '720p', '1080p', '4k', '5k', 'custom')
+            video_params: Video parameters dict {'width', 'height', 'fps', 'video_bitrate', 'audio_bitrate'}
             count: Number of cameras to create
-            custom_params: Custom parameters dict (required if preset='custom')
+            sub_profile: Enable sub-profile (480p) stream
+            camera_name: Manufacturer name for the camera (default: 'MockONVIF')
+            edit_params: Optional dict with edit parameters (trim_start, trim_end, speed, extend_last_frame)
 
         Returns:
             List of camera info dictionaries
         """
-        app_logger.info(f"Starting batch camera deployment: {count} cameras with preset {preset}")
+        app_logger.info(f"Starting batch camera deployment: {count} cameras with {video_params['width']}x{video_params['height']}")
 
         # Generate a shared video ID for the transcoded file
         shared_video_id = str(uuid.uuid4())
@@ -677,7 +837,7 @@ class CameraManager:
         final_video_path_sub = None
         try:
             result = CameraManager.transcode_video(
-                temp_video_path, final_video_path, preset, custom_params, sub_profile)
+                temp_video_path, final_video_path, video_params, sub_profile, edit_params)
             if sub_profile:
                 final_video_path, final_video_path_sub = result
             # Delete original video after successful transcode
@@ -723,11 +883,11 @@ class CameraManager:
                     camera_id,
                     final_video_path,
                     shared_video_id,
-                    preset,
+                    video_params,
                     onvif_used_ports,
                     True,  # skip_snapshot=True, use shared snapshot
-                    custom_params,
-                    sub_profile
+                    sub_profile,
+                    camera_name
                 ): i for i, camera_id in enumerate(camera_ids)
             }
 
@@ -761,13 +921,15 @@ class CameraManager:
         return camera_infos
 
     @staticmethod
-    def create_camera(video_file, preset='1080p', custom_params=None, sub_profile=False):
+    def create_camera(video_file, video_params, sub_profile=False, camera_name='MockONVIF', edit_params=None):
         """Create a new fake ONVIF camera from uploaded video
 
         Args:
             video_file: Uploaded video file
-            preset: Quality preset ('480p', '720p', '1080p', '4k', '5k', 'custom')
-            custom_params: Custom parameters dict (required if preset='custom')
+            video_params: Video parameters dict {'width', 'height', 'fps', 'video_bitrate', 'audio_bitrate'}
+            sub_profile: Enable sub-profile (480p) stream
+            camera_name: Manufacturer name for the camera (default: 'MockONVIF')
+            edit_params: Optional dict with edit parameters (trim_start, trim_end, speed, extend_last_frame)
         """
         camera_id = str(uuid.uuid4())
 
@@ -779,12 +941,12 @@ class CameraManager:
         except Exception as e:
             raise Exception(f"Failed to save video: {str(e)}")
 
-        # Step 2: Transcode video to optimized format with selected preset (and 480p if sub_profile)
+        # Step 2: Transcode video to optimized format with specified parameters (and 480p if sub_profile)
         final_video_path_sub = None
         try:
             app_logger.info(f"Transcoding video for camera {camera_id[:8]}...")
             result = CameraManager.transcode_video(
-                temp_video_path, final_video_path, preset, custom_params, sub_profile)
+                temp_video_path, final_video_path, video_params, sub_profile, edit_params)
             if sub_profile:
                 final_video_path, final_video_path_sub = result
             # Delete original video after successful transcode
@@ -821,11 +983,11 @@ class CameraManager:
         # Step 5: Start FFmpeg → mediamtx RTSP server (using copy mode)
         ffmpeg_pid_sub = None
         try:
-            ffmpeg_pid, ffmpeg_log = CameraManager.start_ffmpeg_process(final_video_path, camera_id)
+            ffmpeg_pid = CameraManager.start_ffmpeg_process(final_video_path, camera_id)
 
             # Start second FFmpeg process for sub-stream if sub_profile enabled
             if sub_profile and final_video_path_sub:
-                ffmpeg_pid_sub, ffmpeg_log_sub = CameraManager.start_ffmpeg_process(
+                ffmpeg_pid_sub = CameraManager.start_ffmpeg_process(
                     final_video_path_sub, f"{camera_id}_sub")
         except Exception as e:
             # Clean up video and snapshot
@@ -837,19 +999,17 @@ class CameraManager:
 
         # Step 6: Save config for reference
         config_path = CAMERAS_DIR / f"config_{camera_id}.yaml"
+        created_at = int(time.time())
 
         config = {
             'camera_id': camera_id,
             'rtsp_stream': f"rtsp://{MEDIAMTX_HOST}:{MEDIAMTX_RTSP_PORT}/{camera_id}",
             'onvif_port': onvif_port,
-            'preset': preset,
+            'video_params': video_params,
             'sub_profile': sub_profile,
-            'note': 'RTSP via mediamtx, ONVIF on dedicated port'
+            'manufacturer': camera_name,
+            'created_at': created_at,
         }
-
-        # Save custom parameters if preset is custom
-        if preset == 'custom' and custom_params:
-            config['custom_params'] = custom_params
 
         try:
             with open(config_path, 'w') as f:
@@ -864,10 +1024,9 @@ class CameraManager:
 
         # Step 7: Extract ONVIF parameters and start dedicated ONVIF server instance for this camera
         try:
-            width, height, fps, video_bitrate_kbps, audio_bitrate_kbps = CameraManager._extract_onvif_params(
-                preset, custom_params)
+            width, height, fps, video_bitrate_kbps, audio_bitrate_kbps = CameraManager._extract_onvif_params(video_params)
             onvif_pid = CameraManager.start_onvif_server(
-                camera_id, onvif_port, width, height, fps, video_bitrate_kbps, audio_bitrate_kbps, None, sub_profile)
+                camera_id, onvif_port, width, height, fps, video_bitrate_kbps, audio_bitrate_kbps, None, sub_profile, camera_name)
         except Exception as e:
             os.kill(ffmpeg_pid, signal.SIGTERM)
             os.remove(final_video_path)
@@ -890,12 +1049,13 @@ class CameraManager:
             "onvif_url": f"{server_ip}:{onvif_port}",
             "username": "test",
             "password": "pass",
-            "preset": preset,
             "width": width,
             "height": height,
             "fps": fps,
             "video_bitrate_mbps": round(video_bitrate_kbps / 1000, 2),
-            "sub_profile": sub_profile
+            "sub_profile": sub_profile,
+            "manufacturer": camera_name,
+            "created_at": created_at
         }
 
         # Add sub-stream info if sub_profile enabled
@@ -938,11 +1098,11 @@ class CameraManager:
 
             # Reap defunct process using waitpid with WNOHANG
             try:
-                pid, status = os.waitpid(ffmpeg_pid, os.WNOHANG)
+                pid, _ = os.waitpid(ffmpeg_pid, os.WNOHANG)
                 if pid == 0:
                     # Process not yet defunct, try one more time
                     time.sleep(0.3)
-                    pid, status = os.waitpid(ffmpeg_pid, os.WNOHANG)
+                    os.waitpid(ffmpeg_pid, os.WNOHANG)
             except ChildProcessError:
                 # Not a child process or already reaped
                 pass
@@ -967,10 +1127,10 @@ class CameraManager:
 
                 # Reap sub-stream process
                 try:
-                    pid, status = os.waitpid(ffmpeg_pid_sub, os.WNOHANG)
+                    pid, _ = os.waitpid(ffmpeg_pid_sub, os.WNOHANG)
                     if pid == 0:
                         time.sleep(0.3)
-                        pid, status = os.waitpid(ffmpeg_pid_sub, os.WNOHANG)
+                        os.waitpid(ffmpeg_pid_sub, os.WNOHANG)
                 except (ChildProcessError, Exception) as e:
                     app_logger.debug(f"Could not reap sub-stream defunct process: {e}")
 
@@ -1103,13 +1263,13 @@ class CameraManager:
             # Start FFmpeg process(es)
             ffmpeg_pid_sub = None
             try:
-                ffmpeg_pid, ffmpeg_log = CameraManager.start_ffmpeg_process(video_path, camera_id)
+                ffmpeg_pid = CameraManager.start_ffmpeg_process(video_path, camera_id)
 
                 # Start second FFmpeg process for sub-stream if sub_profile enabled
                 if sub_profile:
                     video_path_sub = Path(str(video_path).replace('.mp4', '_sub.mp4'))
                     if video_path_sub.exists():
-                        ffmpeg_pid_sub, ffmpeg_log_sub = CameraManager.start_ffmpeg_process(
+                        ffmpeg_pid_sub = CameraManager.start_ffmpeg_process(
                             video_path_sub, f"{camera_id}_sub")
                     else:
                         app_logger.warning(f"Sub-profile enabled but sub video file not found: {video_path_sub}")
@@ -1157,18 +1317,22 @@ class CameraManager:
                 except Exception as e:
                     app_logger.warning(f"Failed to update config with new port for {camera_id[:8]}: {str(e)}")
 
-            # Get preset from config, default to '1080p' for old cameras
-            preset = config.get('preset', '1080p')
+            # Get video_params from config (required)
+            video_params = config.get('video_params')
+            if not video_params:
+                return None, f"{camera_id[:8]}: Missing video_params in config. Run migrate_configs.py first."
 
-            # Get custom parameters if preset is custom
-            custom_params = config.get('custom_params') if preset == 'custom' else None
+            # Get manufacturer from config
+            manufacturer = config.get('manufacturer', 'MockONVIF')
+
+            # Get created_at from config (default to 0 for old configs)
+            created_at = config.get('created_at', 0)
 
             # Extract ONVIF parameters and start ONVIF server
             try:
-                width, height, fps, video_bitrate_kbps, audio_bitrate_kbps = CameraManager._extract_onvif_params(
-                    preset, custom_params)
+                width, height, fps, video_bitrate_kbps, audio_bitrate_kbps = CameraManager._extract_onvif_params(video_params)
                 onvif_pid = CameraManager.start_onvif_server(
-                    camera_id, onvif_port, width, height, fps, video_bitrate_kbps, audio_bitrate_kbps, shared_video_id, sub_profile)
+                    camera_id, onvif_port, width, height, fps, video_bitrate_kbps, audio_bitrate_kbps, shared_video_id, sub_profile, manufacturer)
             except Exception as e:
                 # ONVIF server failed, clean up FFmpeg process(es)
                 try:
@@ -1195,18 +1359,19 @@ class CameraManager:
                 "onvif_url": f"{server_ip}:{onvif_port}",
                 "username": "test",
                 "password": "pass",
-                "preset": preset,
                 "width": width,
                 "height": height,
                 "fps": fps,
                 "video_bitrate_mbps": round(video_bitrate_kbps / 1000, 2),
-                "sub_profile": sub_profile
+                "sub_profile": sub_profile,
+                "manufacturer": manufacturer,
+                "created_at": created_at
             }
 
             # Add shared_video_id for batch cameras
             if shared_video_id:
                 camera_info["shared_video_id"] = shared_video_id
-
+            
             # Add sub-stream info if sub_profile enabled
             if sub_profile:
                 camera_info["ffmpeg_pid_sub"] = ffmpeg_pid_sub

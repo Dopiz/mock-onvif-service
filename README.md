@@ -1,8 +1,6 @@
 # ONVIF Virtual Camera Service
 
-An application that transforms video files into RTSP streams with ONVIF support, enabling seamless integration with NVR platforms such as UniFi Protect.
-
-![Demo](static/demo.gif)
+An application that transforms video files into RTSP streams with ONVIF support, enabling seamless integration with NVR platforms.
 
 ## ✨ Key Features
 
@@ -18,9 +16,10 @@ An application that transforms video files into RTSP streams with ONVIF support,
 
 ### Required Dependencies
 
-#### 1. **Python 3.8+** (3.13+ recommended)
+#### 1. **Python 3.13** (recommended)
 
-Python is required for running the service. After installing uv, you can use it to manage Python environments.
+Python is required for running the service. 
+After installing `uv`, you can use it to manage Python environments.
 
 ```bash
 # Check if Python is available
@@ -81,13 +80,26 @@ rm mediamtx.tar.gz
 mediamtx --version
 ```
 
-
-
 ---
 
 ## 📦 Installation & Deployment & Start Service
 
-### 🐳 Method 1: Docker Deployment (Easiest - Recommended)
+### ⚙️ Configuration (Optional)
+
+Create `.env` file from `.env.example` to customize server settings:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` to configure:
+- `SERVER_HOST`: Server host (default: `0.0.0.0`)
+- `SERVER_PORT`: Server port (default: `9999`)
+- `DEBUG_MODE`: Enable debug mode (default: `false`)
+
+**Note**: For Docker deployment, you can also set these via environment variables in `docker-compose.yml` or pass them when running `docker compose up`.
+
+### 🐳 Method 1: Docker Deployment
 
 **Only requires Docker installed!** No need to install Python, FFmpeg, or mediamtx.
 
@@ -104,23 +116,34 @@ open http://localhost:9999
 
 **⚠️ Important Note about Docker Networking (or Port Forwarding Environment):**
 
-Due to Docker's bridge network, the Web UI will display the container's internal IP (172.x.x.x) by default. To show your **host machine's IP address** instead, set the `SERVER_IP` environment variable:
+Due to Docker's bridge network, the service will use the container's internal IP (172.x.x.x) by default. This causes two critical issues:
+
+1. **Web UI Display**: The camera cards in the Web UI will show RTSP and ONVIF URLs with the container's internal IP (e.g., `rtsp://172.19.0.3:8554/camera-id`), which is not accessible from outside the Docker network.
+
+2. **ONVIF Service Configuration**: When NVR platforms (like UniFi Protect) query the ONVIF server, they receive URLs containing the container's internal IP. This prevents the NVR from accessing the camera streams because it cannot reach the container's internal network.
+
+**Solution**: Set the `EXTERNAL_IP` environment variable to your **host machine's IP address**. This ensures:
+
+- ✅ Web UI displays correct, accessible RTSP and ONVIF URLs
+- ✅ ONVIF server tells NVR platforms the correct IP address for stream access
+- ✅ Cameras can be properly discovered and accessed by external devices
 
 ```bash
 # Find your host IP first
 ifconfig | grep "inet " | grep -v 127.0.0.1
 
 # Start with your host IP (example: 192.168.1.100)
-SERVER_IP=192.168.1.100 docker compose up -d
+EXTERNAL_IP=192.168.1.100 docker compose up -d
 ```
 
+**Example**: With `EXTERNAL_IP=192.168.1.100`, the Web UI and ONVIF service will show:
+- RTSP URL: `rtsp://192.168.1.100:8554/camera-id`
+- ONVIF URL: `192.168.1.100:12000`
 
-**Docker Port Mapping:**
-- Port `9999`: Web management interface
-- Port `8554`: RTSP streaming (mediamtx)
-- Ports `12000-12999`: ONVIF services (one port per camera, supports up to 1000 cameras)
+Instead of the inaccessible container IP (e.g., `rtsp://172.19.0.3:8554/camera-id`).
 
-### Method 2: Automated Deployment (Native)
+
+### Method 2: Automated Deployment
 
 ```bash
 # 1. Enter project directory
@@ -129,31 +152,12 @@ cd mock-onvif-camera
 # 2. Run automated deployment script
 ./setup.sh
 
-# 3. One-click startup (automatically starts mediamtx and main service)
+# 3. (Optional) Create .env file to customize settings
+cp .env.example .env
+# Edit .env if needed
+
+# 4. One-click startup (automatically starts mediamtx and main service)
 ./start.sh
-```
-
-### Method 3: Manual Installation (Native)
-
-```bash
-# 1. Enter project directory
-cd mock-onvif-camera
-
-# 2. Create virtual environment using uv
-uv venv
-
-# 3. Install Python dependencies using uv
-uv pip install -r requirements.txt
-
-# 4. Create necessary directories
-mkdir -p data/videos data/cameras data/snapshots logs/onvif logs/ffmpeg static
-
-# 5-1. Start up mediamtx
-mediamtx
-
-# 5-2. Start up service
-cd mockingCameras
-.venv/bin/python3 run.py
 ```
 
 ---
@@ -166,13 +170,13 @@ cd mockingCameras
 2. Select video file and configure settings:
     - **Camera Count**: 
       - `Single Camera`: Create one camera instance
-      - `Multi-Cameras`: Create multiple cameras sharing the same video (batch mode)
+      - `Multiple Cameras`: Create multiple cameras sharing the same video (batch mode)
     - **Quality Settings**:
-      - Choose preset: `480p`, `720p`, `1080p`, `4K`, `5K`
+      - Choose resolution: `480p`, `720p`, `1080p`, `4K`, `5K`
       - Or use `Custom` to set resolution, FPS, and bitrate manually
-    - **Enable Sub Profile (480p)**: Optional secondary 480p stream for single cameras
+    - **Enable Sub Profile**: Optional secondary 480p stream for single cameras
       - Main profile uses your selected quality
-      - Sub profile fixed at 480p (accessible via ONVIF Profile_2)
+      - Sub profile fixed at `480p` (accessible via ONVIF Profile_2)
 3. System will automatically:
     - Start FFmpeg process to push video to RTSP
     - Start independent ONVIF server instance
@@ -185,7 +189,18 @@ Each camera displays:
 - **RTSP URL**: `rtsp://your-ip:8554/[camera-id]`
 - **ONVIF URL**: `http://your-ip:[port]/onvif/device_service`
 - **Port**: Each camera has independent ONVIF port (12000, 12001, 12002...)
-- **Authentication**: Username `test` with any password
+
+### Add to NVR platform
+
+Taking UniFi Protect (6.2.88) as an example:
+1. Go to Devices page
+2. Click `?` icon, then click `try advanced adoption` (Or use AI Port)
+3. Enter:
+   - **IP Address**: `your-ip:onvif-port` (e.g., `192.168.0.87:12000`)
+   - **Username**: Any Username (e.g., `test`)
+   - **Password**: Any password (e.g., `pass`)
+4. Click `Confirm`
+5. Wait 10-30 seconds for camera to come online
 
 ### Delete Camera
 
@@ -209,7 +224,7 @@ FFmpeg (stream copy, push to mediamtx)
    ↓
 mediamtx:8554 (RTSP server)
    ↓
-NVR Platform (pull stream directly)
+UniFi Protect (pull stream directly)
    ↑
 ONVIF Server:12000+ (provide device info and stream URL)
 ```
@@ -221,7 +236,8 @@ ONVIF Server:12000+ (provide device info and stream URL)
 3. **Snapshot Generation**: FFmpeg analyzes first 100 frames (after skipping 2 seconds) using thumbnail filter to select the best representative frame
 4. **FFmpeg Streaming**: Reads transcoded video, uses stream copy mode (no re-encoding), loops playback, pushes RTSP stream to mediamtx
 5. **mediamtx**: Receives FFmpeg's stream, serves as RTSP server externally
-6. **ONVIF Server**: Provides ONVIF Device/Media services
+6. **ONVIF Server**: Provides ONVIF Device/Media services, tells UniFi Protect where the RTSP URL is
+7. **UniFi Protect**: Queries RTSP URL via ONVIF, then pulls video stream directly from mediamtx
 
 ---
 
@@ -261,7 +277,7 @@ curl -u test:pass -X POST http://localhost:12000/onvif/device_service \
 </soap:Envelope>'
 ```
 
-### 4. List All Cameras
+### 4. List All Mock Cameras
 ```bash
 curl -s http://localhost:9999/cameras | jq
 ```
@@ -314,20 +330,12 @@ ffmpeg -ss 00:00:02 -i video.mp4 \
   snapshot.jpg
 ```
 
-**Note**: Recommended to upload videos longer than 5 seconds for best snapshot quality (skips first 2 seconds to avoid black screens/titles).
-
-### CPU Usage
-
-- **Expected CPU usage during streaming**: ~1-2% per camera (stream copy mode)
-- **Expected CPU usage during upload**: ~30-50% (one-time transcoding)
-- **Snapshot generation time**: ~1-2 seconds per video
-
 ---
 
 ## 📂 Directory Structure
 
 ```
-mock-onvif-service/
+mock-onvif-camera/
 ├── .venv/                  # Python virtual environment (created by uv)
 ├── app/                    # Application modules
 │   ├── __init__.py         # Package initializer
@@ -339,38 +347,33 @@ mock-onvif-service/
 ├── static/                 # Frontend assets
 │   ├── index.html          # Web UI
 │   ├── app.js              # Frontend logic
-│   └── styles.css          # Styles
+│   ├── styles.css          # Styles
+│   └── ulogo.png           # Logo image
 ├── data/                   # Runtime data (created on first run)
 │   ├── videos/             # Uploaded video storage
 │   ├── snapshots/          # Camera snapshots/thumbnails (JPEG)
-│   └── cameras/            # Camera configuration files (YAML)
+│   ├── cameras/            # Camera configuration files (YAML)
+│   ├── ffmpeg_logs/        # FFmpeg process logs
+│   └── onvif_logs/         # ONVIF server logs
+├── mediamtx.yml            # mediamtx configuration (for macOS)
 ├── onvif_server.py         # ONVIF server implementation
-├── run.py                  # Main startup script
 ├── requirements.txt        # Python dependencies
-├── mediamtx.yml            # mediamtx configuration (macOS only)
+├── run.py                  # Main startup script
 ├── setup.sh                # Automated setup script (cross-platform)
 ├── start.sh                # Quick start script (cross-platform)
 └── README.md
 ```
 
-### Key Files
-
-- **`setup.sh`**: One-time setup script that installs dependencies and creates environment
-- **`start.sh`**: Starts mediamtx and MockCamera service
-- **`run.py`**: Python entry point that initializes Flask app and restores cameras
-- **`onvif_server.py`**: Standalone ONVIF server process for each camera
-- **`mediamtx.yml`**: Configuration for mediamtx (used on macOS, not on Linux)
-
 ### Generated Directories
 
-These directories are automatically created when you run the service:
+These directories are automatically created when you setup/run the service:
 
+- **`.venv/`**: Python virtual environment managed by uv
 - **`data/videos/`**: Stores uploaded video files (named by camera UUID)
 - **`data/snapshots/`**: Stores camera snapshots/thumbnails extracted from videos (first frame)
 - **`data/cameras/`**: Stores camera configuration YAML files
 - **`logs/ffmpeg/`**: Logs from FFmpeg streaming processes
 - **`logs/onvif/`**: Logs from ONVIF server instances
-- **`.venv/`**: Python virtual environment managed by uv
 
 ---
 
@@ -380,8 +383,8 @@ These directories are automatically created when you run the service:
 |---------|------|---------|
 | Flask Web UI | 9999 | Web management interface |
 | mediamtx RTSP | 8554 | RTSP streaming service |
-| ONVIF Camera 1 | 12000 | First camera's ONVIF service |
-| ONVIF Camera 2 | 12001 | Second camera's ONVIF service |
-| ONVIF Camera N | 12000+N-1 | Nth camera's ONVIF service |
+| ONVIF Camera 0 | 12000 | First camera's ONVIF service |
+| ONVIF Camera 1 | 12001 | Second camera's ONVIF service |
+| ONVIF Camera N | 12000+N | Nth camera's ONVIF service |
 
 ---

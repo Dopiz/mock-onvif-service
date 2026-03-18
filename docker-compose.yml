@@ -19,10 +19,15 @@ services:
       dockerfile: Dockerfile
     container_name: mock-camera-service
     restart: unless-stopped
+    stop_grace_period: 10s
     depends_on:
       - mediamtx
     ports:
-      - "9999:9999"       # Web UI
+      # Web UI port mapping
+      # Format: "HOST_PORT:CONTAINER_PORT"
+      # The container port (right side) should match SERVER_PORT environment variable
+      # Example: If SERVER_PORT=8889, use "8889:8889" or "8080:8889" (map host 8080 to container 8889)
+      - "${SERVER_PORT:-9999}:${SERVER_PORT:-9999}"
       - "12000-12999:12000-12999"  # ONVIF services (up to 1,000 cameras)
     volumes:
       # Persist camera data
@@ -31,18 +36,24 @@ services:
       # - ./videos:/app/videos:ro
     environment:
       # MediaMTX connection settings
-      - MEDIAMTX_HOST=mediamtx
-      - MEDIAMTX_PORT=8554
-      # Server IP (set this to your host machine's IP for external access)
-      # Usage: SERVER_IP=192.168.1.100 docker compose up -d
-      - SERVER_IP=${SERVER_IP:-}
+      - MEDIAMTX_HOST=${MEDIAMTX_HOST:-mediamtx}
+      - MEDIAMTX_PORT=${MEDIAMTX_PORT:-8554}
+      # Server configuration
+      - SERVER_HOST=${SERVER_HOST:-0.0.0.0}
+      - SERVER_PORT=${SERVER_PORT:-9999}
+      - DEBUG_MODE=${DEBUG_MODE:-false}
+      # External IP (set this to your host machine's IP for external access)
+      # Used for RTSP/ONVIF URLs displayed in Web UI and provided to NVR platforms
+      # Usage: EXTERNAL_IP=192.168.1.100 docker compose up -d
+      - EXTERNAL_IP=${EXTERNAL_IP:-}
       # Service settings
       - FLASK_ENV=production
       - PYTHONUNBUFFERED=1
     networks:
       - mock-camera-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9999/cameras"]
+      # Health check reads SERVER_PORT from container environment
+      test: ["CMD-SHELL", "curl -f http://localhost:$${SERVER_PORT:-9999}/cameras || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
