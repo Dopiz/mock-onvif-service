@@ -79,6 +79,15 @@ def cleanup_on_exit():
 
         print("\n✓ All resources cleaned up")
 
+        # macvlan: clean up all cam_* interfaces
+        try:
+            from app.camera_manager import MACVLAN_ENABLED, _get_macvlan_manager
+            if MACVLAN_ENABLED:
+                _get_macvlan_manager().cleanup_all()
+                print("  ✓ Cleaned up macvlan interfaces")
+        except Exception as e:
+            print(f"  ⚠ Error cleaning up macvlan interfaces: {e}")
+
     except Exception as e:
         print(f"\n⚠ Error during cleanup: {e}")
 

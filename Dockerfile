@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y \
     curl \
     wget \
     lsof \
+    iproute2 \
+    isc-dhcp-client \
     && rm -rf /var/lib/apt/lists/*
 
 # Set working directory

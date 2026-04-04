@@ -562,15 +562,19 @@ def run_server():
 
     logger.info("ONVIF server started for camera %s", CAMERA_ID[:8])
 
+    # macvlan mode: bind to the specific camera IP so multiple ONVIF servers
+    # can all use port 80 without conflicting (each on its own interface)
+    bind_host = os.getenv('ONVIF_SERVER_IP', '0.0.0.0')
+
     try:
         # Use waitress for production-ready WSGI server (works better in subprocess)
         from waitress import serve
-        print(f"✓ Server ready on http://0.0.0.0:{SERVER_PORT}", flush=True)
-        serve(app, host='0.0.0.0', port=SERVER_PORT, threads=4)
+        print(f"✓ Server ready on http://{bind_host}:{SERVER_PORT}", flush=True)
+        serve(app, host=bind_host, port=SERVER_PORT, threads=4)
     except ImportError:
         # Fallback to Flask development server
         print("⚠ waitress not available, using Flask dev server", flush=True)
-        app.run(host='0.0.0.0', port=SERVER_PORT, debug=False, use_reloader=False, threaded=True)
+        app.run(host=bind_host, port=SERVER_PORT, debug=False, use_reloader=False, threaded=True)
     except Exception as e:
         print(f"✗ Error starting server: {e}", flush=True)
         sys.exit(1)

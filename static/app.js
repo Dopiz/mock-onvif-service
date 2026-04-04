@@ -1612,6 +1612,10 @@ function createCameraCard(camera) {
                     <span class="info-label">ONVIF PORT</span>
                     <span class="info-value">${camera.onvif_port}</span>
                 </div>
+                ${camera.camera_ip ? `<div class="info-row">
+                    <span class="info-label">CAMERA IP</span>
+                    <span class="info-value">${camera.camera_ip}</span>
+                </div>` : ''}
             </div>
 
             <div class="camera-urls">
