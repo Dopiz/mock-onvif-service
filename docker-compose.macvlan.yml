@@ -1,0 +1,44 @@
+# Macvlan overlay — gives each mock camera its own IP + MAC on the LAN.
+#
+# Prerequisites:
+#   1. Linux host only (not supported on macOS Docker Desktop)
+#   2. Run ARP isolation on the host first:
+#        sudo bash scripts/setup-macvlan-host.sh eth0
+#   3. Configure macvlan settings in .env (see .env.example)
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.macvlan.yml up -d
+
+services:
+  mock-camera:
+    cap_add:
+      - NET_ADMIN
+    networks:
+      mock-camera-network: {}      # bridge — for mediamtx communication
+      mock-camera-macvlan: {}      # macvlan — exposes cameras on the LAN
+    ports:
+      # macvlan mode: no 12000-12999 range needed (each camera has its own IP)
+      - "${SERVER_PORT:-9999}:${SERVER_PORT:-9999}"
+    environment:
+      - MACVLAN_ENABLED=true
+      # IP assignment mode:
+      #   MACVLAN_DHCP=true  → router assigns IPs automatically (recommended)
+      #   MACVLAN_DHCP=false → use static pool defined by IP_START/END below
+      - MACVLAN_DHCP=${MACVLAN_DHCP:-false}
+      # Name of the macvlan interface inside the container (usually eth1)
+      - MACVLAN_PARENT_IFACE=${MACVLAN_PARENT_IFACE:-eth1}
+      # Static IP pool — only required when MACVLAN_DHCP=false
+      - MACVLAN_SUBNET=${MACVLAN_SUBNET:-192.168.0.0/24}
+      - MACVLAN_GATEWAY=${MACVLAN_GATEWAY:-192.168.0.1}
+      - MACVLAN_IP_START=${MACVLAN_IP_START:-192.168.0.201}
+      - MACVLAN_IP_END=${MACVLAN_IP_END:-192.168.0.250}
+
+networks:
+  mock-camera-macvlan:
+    driver: macvlan
+    driver_opts:
+      parent: ${MACVLAN_PARENT:-eth0}
+    ipam:
+      config:
+        - subnet: ${MACVLAN_SUBNET:-192.168.0.0/24}
+          gateway: ${MACVLAN_GATEWAY:-192.168.0.1}

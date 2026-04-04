@@ -30,6 +30,26 @@ MEDIAMTX_RTSP_PORT = int(os.getenv('MEDIAMTX_PORT', '8554'))  # Fixed RTSP port 
 ONVIF_PORT_MIN = 12000     # ONVIF port range start
 ONVIF_PORT_MAX = 13000     # ONVIF port range end
 
+# Macvlan mode — each camera gets its own IP + MAC on the LAN
+MACVLAN_ENABLED = os.getenv('MACVLAN_ENABLED', 'false').lower() == 'true'
+_macvlan_manager = None
+
+
+def _get_macvlan_manager():
+    global _macvlan_manager
+    if _macvlan_manager is None:
+        from app.macvlan_manager import MacvlanManager
+        use_dhcp = os.getenv('MACVLAN_DHCP', 'false').lower() == 'true'
+        _macvlan_manager = MacvlanManager(
+            subnet=os.getenv('MACVLAN_SUBNET', '192.168.0.0/24'),
+            gateway=os.getenv('MACVLAN_GATEWAY', '192.168.0.1'),
+            ip_start=os.getenv('MACVLAN_IP_START', '192.168.0.201'),
+            ip_end=os.getenv('MACVLAN_IP_END', '192.168.0.250'),
+            parent_iface=os.getenv('MACVLAN_PARENT_IFACE', 'eth1'),
+            use_dhcp=use_dhcp,
+        )
+    return _macvlan_manager
+
 # Data directories
 DATA_DIR = Path("./data")
 VIDEOS_DIR = DATA_DIR / "videos"
@@ -541,7 +561,7 @@ class CameraManager:
         return ffmpeg_pid
 
     @staticmethod
-    def start_onvif_server(camera_id, onvif_port, width, height, fps, video_bitrate_kbps, audio_bitrate_kbps, shared_video_id=None, sub_profile=False, camera_name='MockONVIF'):
+    def start_onvif_server(camera_id, onvif_port, width, height, fps, video_bitrate_kbps, audio_bitrate_kbps, shared_video_id=None, sub_profile=False, camera_name='MockONVIF', camera_ip=None):
         """Start ONVIF server instance for a camera
 
         Args:
@@ -579,7 +599,7 @@ class CameraManager:
             'ONVIF_CAMERA_ID': camera_id,
             'ONVIF_RTSP_URL': rtsp_url,
             'ONVIF_PORT': str(onvif_port),
-            'ONVIF_SERVER_IP': server_ip,
+            'ONVIF_SERVER_IP': camera_ip or server_ip,  # macvlan: bind to specific IP
             'ONVIF_WIDTH': str(width),
             'ONVIF_HEIGHT': str(height),
             'ONVIF_FPS': str(fps),
@@ -708,11 +728,19 @@ class CameraManager:
                 except Exception as e:
                     app_logger.warning(f"Failed to generate snapshot for camera {camera_id[:8]}: {str(e)}")
 
-            # Allocate ONVIF port (thread-safe)
-            try:
-                onvif_port = CameraManager.allocate_port(ONVIF_PORT_MIN, ONVIF_PORT_MAX, onvif_used_ports)
-            except Exception as e:
-                return None, f"Failed to allocate ONVIF port: {str(e)}"
+            # Allocate ONVIF port or macvlan IP (thread-safe)
+            camera_ip = None
+            if MACVLAN_ENABLED:
+                try:
+                    camera_ip = _get_macvlan_manager().create_interface(camera_id)
+                    onvif_port = 80
+                except Exception as e:
+                    return None, f"Failed to create macvlan interface: {str(e)}"
+            else:
+                try:
+                    onvif_port = CameraManager.allocate_port(ONVIF_PORT_MIN, ONVIF_PORT_MAX, onvif_used_ports)
+                except Exception as e:
+                    return None, f"Failed to allocate ONVIF port: {str(e)}"
 
             # Start FFmpeg process (using the shared transcoded video)
             ffmpeg_pid_sub = None
@@ -745,6 +773,8 @@ class CameraManager:
                 'manufacturer': camera_name,
                 'created_at': created_at,
             }
+            if MACVLAN_ENABLED and camera_ip:
+                config['camera_ip'] = camera_ip
 
             try:
                 with open(config_path, 'w') as f:
@@ -757,7 +787,7 @@ class CameraManager:
             try:
                 width, height, fps, video_bitrate_kbps, audio_bitrate_kbps = CameraManager._extract_onvif_params(video_params)
                 onvif_pid = CameraManager.start_onvif_server(
-                    camera_id, onvif_port, width, height, fps, video_bitrate_kbps, audio_bitrate_kbps, shared_video_id, sub_profile, camera_name)
+                    camera_id, onvif_port, width, height, fps, video_bitrate_kbps, audio_bitrate_kbps, shared_video_id, sub_profile, camera_name, camera_ip)
             except Exception as e:
                 os.kill(ffmpeg_pid, signal.SIGTERM)
                 if config_path.exists():
@@ -774,7 +804,7 @@ class CameraManager:
                 "ffmpeg_pid": ffmpeg_pid,
                 "onvif_pid": onvif_pid,
                 "rtsp_url": f"rtsp://{server_ip}:{MEDIAMTX_RTSP_PORT}/{camera_id}",
-                "onvif_url": f"{server_ip}:{onvif_port}",
+                "onvif_url": f"{camera_ip}:80" if MACVLAN_ENABLED and camera_ip else f"{server_ip}:{onvif_port}",
                 "username": "test",
                 "password": "pass",
                 "shared_video_id": shared_video_id,
@@ -786,6 +816,8 @@ class CameraManager:
                 "manufacturer": camera_name,
                 "created_at": created_at
             }
+            if MACVLAN_ENABLED and camera_ip:
+                camera_info["camera_ip"] = camera_ip
 
             # Add sub-stream info if sub_profile enabled
             if sub_profile:
@@ -968,17 +1000,28 @@ class CameraManager:
             os.remove(final_video_path)
             raise Exception(f"Failed to generate snapshot: {str(e)}")
 
-        # Step 4: Allocate ONVIF port
-        onvif_used = CameraManager.get_used_onvif_ports()
-        try:
-            onvif_port = CameraManager.allocate_port(ONVIF_PORT_MIN, ONVIF_PORT_MAX, onvif_used)
-        except Exception as e:
-            # Clean up video and snapshot
-            os.remove(final_video_path)
-            snapshot_path = SNAPSHOTS_DIR / f"{camera_id}.jpg"
-            if snapshot_path.exists():
-                os.remove(snapshot_path)
-            raise Exception(f"Failed to allocate ONVIF port: {str(e)}")
+        # Step 4: Allocate ONVIF port or macvlan IP
+        camera_ip = None
+        if MACVLAN_ENABLED:
+            try:
+                camera_ip = _get_macvlan_manager().create_interface(camera_id)
+                onvif_port = 80
+            except Exception as e:
+                os.remove(final_video_path)
+                snapshot_path = SNAPSHOTS_DIR / f"{camera_id}.jpg"
+                if snapshot_path.exists():
+                    os.remove(snapshot_path)
+                raise Exception(f"Failed to create macvlan interface: {str(e)}")
+        else:
+            onvif_used = CameraManager.get_used_onvif_ports()
+            try:
+                onvif_port = CameraManager.allocate_port(ONVIF_PORT_MIN, ONVIF_PORT_MAX, onvif_used)
+            except Exception as e:
+                os.remove(final_video_path)
+                snapshot_path = SNAPSHOTS_DIR / f"{camera_id}.jpg"
+                if snapshot_path.exists():
+                    os.remove(snapshot_path)
+                raise Exception(f"Failed to allocate ONVIF port: {str(e)}")
 
         # Step 5: Start FFmpeg → mediamtx RTSP server (using copy mode)
         ffmpeg_pid_sub = None
@@ -1010,6 +1053,8 @@ class CameraManager:
             'manufacturer': camera_name,
             'created_at': created_at,
         }
+        if MACVLAN_ENABLED and camera_ip:
+            config['camera_ip'] = camera_ip
 
         try:
             with open(config_path, 'w') as f:
@@ -1026,7 +1071,7 @@ class CameraManager:
         try:
             width, height, fps, video_bitrate_kbps, audio_bitrate_kbps = CameraManager._extract_onvif_params(video_params)
             onvif_pid = CameraManager.start_onvif_server(
-                camera_id, onvif_port, width, height, fps, video_bitrate_kbps, audio_bitrate_kbps, None, sub_profile, camera_name)
+                camera_id, onvif_port, width, height, fps, video_bitrate_kbps, audio_bitrate_kbps, None, sub_profile, camera_name, camera_ip)
         except Exception as e:
             os.kill(ffmpeg_pid, signal.SIGTERM)
             os.remove(final_video_path)
@@ -1046,7 +1091,7 @@ class CameraManager:
             "ffmpeg_pid": ffmpeg_pid,
             "onvif_pid": onvif_pid,
             "rtsp_url": f"rtsp://{server_ip}:{MEDIAMTX_RTSP_PORT}/{camera_id}",
-            "onvif_url": f"{server_ip}:{onvif_port}",
+            "onvif_url": f"{camera_ip}:80" if MACVLAN_ENABLED and camera_ip else f"{server_ip}:{onvif_port}",
             "username": "test",
             "password": "pass",
             "width": width,
@@ -1057,6 +1102,8 @@ class CameraManager:
             "manufacturer": camera_name,
             "created_at": created_at
         }
+        if MACVLAN_ENABLED and camera_ip:
+            camera_info["camera_ip"] = camera_ip
 
         # Add sub-stream info if sub_profile enabled
         if sub_profile:
@@ -1151,6 +1198,13 @@ class CameraManager:
                 pass  # Process already dead or no permission
             except Exception as e:
                 app_logger.warning(f"Failed to kill ONVIF process: {str(e)}")
+
+        # Step 1.6: macvlan — remove interface and release IP
+        if MACVLAN_ENABLED and 'camera_ip' in camera:
+            try:
+                _get_macvlan_manager().delete_interface(camera_id, camera['camera_ip'])
+            except Exception as e:
+                app_logger.warning(f"Failed to delete macvlan interface: {e}")
 
         # Step 2: Delete video file (only if no other cameras are using it)
         try:
@@ -1282,40 +1336,63 @@ class CameraManager:
                         pass
                 return None, f"{camera_id[:8]}: Failed to start FFmpeg: {str(e)}"
 
-            # Try to restore original ONVIF port, or allocate new one if not available
-            original_port = config.get('onvif_port')
-            onvif_port = None
-            port_changed = False
-
-            if original_port:
-                # Try to use original port (thread-safe check)
-                with PORT_ALLOCATION_LOCK:
-                    if original_port not in onvif_used_ports and not is_port_in_use(original_port):
-                        # Use original port if available
-                        onvif_port = original_port
-                        onvif_used_ports.add(onvif_port)
-
-            if not onvif_port:
-                # Original port not available or in use, allocate new port
+            # Restore ONVIF port or macvlan interface
+            camera_ip = None
+            if MACVLAN_ENABLED and config.get('camera_ip'):
+                # Restore macvlan interface with the persisted IP
                 try:
-                    onvif_port = CameraManager.allocate_port(ONVIF_PORT_MIN, ONVIF_PORT_MAX, onvif_used_ports)
-                    port_changed = True
+                    new_ip = _get_macvlan_manager().restore_interface(camera_id, config['camera_ip'])
+                    camera_ip = new_ip
+                    onvif_port = 80
+                    # DHCP mode: IP may have changed — update config YAML
+                    if new_ip != config.get('camera_ip'):
+                        config['camera_ip'] = new_ip
+                        try:
+                            with open(config_path, 'w') as f:
+                                yaml.dump(config, f)
+                        except Exception as e:
+                            app_logger.warning(f"Failed to update camera_ip in config for {camera_id[:8]}: {e}")
                 except Exception as e:
-                    # Clean up FFmpeg
                     try:
                         os.kill(ffmpeg_pid, signal.SIGTERM)
                     except (ProcessLookupError, OSError):
                         pass
-                    return None, f"{camera_id[:8]}: Failed to allocate ONVIF port: {str(e)}"
+                    return None, f"{camera_id[:8]}: Failed to restore macvlan interface: {str(e)}"
+            else:
+                # Try to restore original ONVIF port, or allocate new one if not available
+                original_port = config.get('onvif_port')
+                onvif_port = None
+                port_changed = False
 
-            # Update config if port changed
-            if port_changed:
-                try:
-                    config['onvif_port'] = onvif_port
-                    with open(config_path, 'w') as f:
-                        yaml.dump(config, f)
-                except Exception as e:
-                    app_logger.warning(f"Failed to update config with new port for {camera_id[:8]}: {str(e)}")
+                if original_port:
+                    # Try to use original port (thread-safe check)
+                    with PORT_ALLOCATION_LOCK:
+                        if original_port not in onvif_used_ports and not is_port_in_use(original_port):
+                            # Use original port if available
+                            onvif_port = original_port
+                            onvif_used_ports.add(onvif_port)
+
+                if not onvif_port:
+                    # Original port not available or in use, allocate new port
+                    try:
+                        onvif_port = CameraManager.allocate_port(ONVIF_PORT_MIN, ONVIF_PORT_MAX, onvif_used_ports)
+                        port_changed = True
+                    except Exception as e:
+                        # Clean up FFmpeg
+                        try:
+                            os.kill(ffmpeg_pid, signal.SIGTERM)
+                        except (ProcessLookupError, OSError):
+                            pass
+                        return None, f"{camera_id[:8]}: Failed to allocate ONVIF port: {str(e)}"
+
+                # Update config if port changed
+                if port_changed:
+                    try:
+                        config['onvif_port'] = onvif_port
+                        with open(config_path, 'w') as f:
+                            yaml.dump(config, f)
+                    except Exception as e:
+                        app_logger.warning(f"Failed to update config with new port for {camera_id[:8]}: {str(e)}")
 
             # Get video_params from config (required)
             video_params = config.get('video_params')
@@ -1332,7 +1409,7 @@ class CameraManager:
             try:
                 width, height, fps, video_bitrate_kbps, audio_bitrate_kbps = CameraManager._extract_onvif_params(video_params)
                 onvif_pid = CameraManager.start_onvif_server(
-                    camera_id, onvif_port, width, height, fps, video_bitrate_kbps, audio_bitrate_kbps, shared_video_id, sub_profile, manufacturer)
+                    camera_id, onvif_port, width, height, fps, video_bitrate_kbps, audio_bitrate_kbps, shared_video_id, sub_profile, manufacturer, camera_ip)
             except Exception as e:
                 # ONVIF server failed, clean up FFmpeg process(es)
                 try:
@@ -1356,7 +1433,7 @@ class CameraManager:
                 "ffmpeg_pid": ffmpeg_pid,
                 "onvif_pid": onvif_pid,
                 "rtsp_url": f"rtsp://{server_ip}:{MEDIAMTX_RTSP_PORT}/{camera_id}",
-                "onvif_url": f"{server_ip}:{onvif_port}",
+                "onvif_url": f"{camera_ip}:80" if MACVLAN_ENABLED and camera_ip else f"{server_ip}:{onvif_port}",
                 "username": "test",
                 "password": "pass",
                 "width": width,
@@ -1367,11 +1444,13 @@ class CameraManager:
                 "manufacturer": manufacturer,
                 "created_at": created_at
             }
+            if MACVLAN_ENABLED and camera_ip:
+                camera_info["camera_ip"] = camera_ip
 
             # Add shared_video_id for batch cameras
             if shared_video_id:
                 camera_info["shared_video_id"] = shared_video_id
-            
+
             # Add sub-stream info if sub_profile enabled
             if sub_profile:
                 camera_info["ffmpeg_pid_sub"] = ffmpeg_pid_sub
