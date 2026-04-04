@@ -1,6 +1,8 @@
-# ONVIF Virtual Camera Service
+# Mock ONVIF Camera Service
 
 An application that transforms video files into RTSP streams with ONVIF support, enabling seamless integration with NVR platforms.
+
+![Demo](static/demo.gif) 
 
 ## ✨ Key Features
 
@@ -267,9 +269,10 @@ cp .env.example .env
 
 Each camera displays:
 - **Camera ID**: Unique identifier
-- **RTSP URL**: `rtsp://your-ip:8554/[camera-id]`
-- **ONVIF URL**: `http://your-ip:[port]/onvif/device_service`
-- **Port**: Each camera has independent ONVIF port (12000, 12001, 12002...)
+- **RTSP URL**: `rtsp://host-ip:8554/[camera-id]`
+- **ONVIF URL** (standard mode): `host-ip:12000` — each camera has its own port (12000, 12001, ...)
+- **ONVIF URL** (macvlan mode): `camera-ip:80` — each camera has its own IP, ONVIF on standard port 80
+- **Camera IP** (macvlan mode only): the IP assigned to this camera on the LAN
 
 ### Add to NVR platform
 
@@ -286,7 +289,7 @@ Taking UniFi Protect (6.2.88) as an example:
 
 ### Delete Camera
 
-Click the "TERMINATE" button on camera card, will automatically:
+Click the `TERMINATE` button on camera card, will automatically:
 - Stop FFmpeg process
 - Stop ONVIF server
 - Delete video and configuration files
@@ -308,7 +311,7 @@ mediamtx:8554 (RTSP server)
    ↓
 UniFi Protect (pull stream directly)
    ↑
-ONVIF Server:12000+ (provide device info and stream URL)
+ONVIF Server:80 / 12000+ (provide device info and stream URL)
 ```
 
 ### Process Flow
