@@ -99,9 +99,91 @@ Edit `.env` to configure:
 
 **Note**: For Docker deployment, you can also set these via environment variables in `docker-compose.yml` or pass them when running `docker compose up`.
 
-### 🐳 Method 1: Docker Deployment
+### 🐳 Method 1: Docker with Macvlan (Per-Camera IP)
 
-**Only requires Docker installed!** No need to install Python, FFmpeg, or mediamtx.
+> **Each camera gets its own IP and MAC address on the LAN**, allowing NVR platforms like UniFi Protect to discover them as independent devices — no port mapping needed, ONVIF runs on standard port 80.
+
+#### Prerequisites
+
+- **Linux host only** — not supported on macOS Docker Desktop
+- Host must be on the same LAN subnet as the target NVR
+- Docker with `NET_ADMIN` capability support
+
+#### Step 1: Configure ARP Isolation (run once on the host)
+
+Without this, the host NIC answers ARP for all macvlan IPs, causing every camera to resolve to the same MAC address.
+
+```bash
+sudo bash scripts/setup-macvlan-host.sh eth0
+```
+
+To make persistent across reboots, add to `/etc/sysctl.conf`:
+```
+net.ipv4.conf.eth0.arp_ignore=1
+net.ipv4.conf.all.arp_ignore=1
+net.ipv4.conf.eth0.arp_announce=2
+net.ipv4.conf.all.arp_announce=2
+```
+
+#### Step 2: Create `.env` file
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` with your network settings:
+
+```env
+# Required
+MACVLAN_ENABLED=true
+MACVLAN_PARENT=eth0            # Host physical NIC
+
+# IP assignment — choose one:
+
+# Option A (recommended): DHCP — router assigns IPs automatically
+MACVLAN_DHCP=true
+
+# Option B: Static IP pool (ensure range doesn't overlap router DHCP)
+# MACVLAN_DHCP=false
+# MACVLAN_SUBNET=192.168.0.0/24
+# MACVLAN_GATEWAY=192.168.0.1
+# MACVLAN_IP_START=192.168.0.201
+# MACVLAN_IP_END=192.168.0.250
+```
+
+> **Note:** `MACVLAN_PARENT_IFACE` (the interface name *inside* the container) is auto-detected. Only set it manually if auto-detection fails.
+
+#### Step 3: Start with macvlan overlay
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.macvlan.yml up -d
+```
+
+#### How it works
+
+```
+Host LAN (192.168.0.0/24)
+├── Router/Gateway (192.168.0.1)
+├── Host (192.168.0.100)
+├── Camera 1 — cam_aabbccdd (192.168.0.201) ← own MAC, ONVIF on :80
+├── Camera 2 — cam_eeff0011 (192.168.0.202) ← own MAC, ONVIF on :80
+└── NVR
+```
+
+- Each camera creates a macvlan sub-interface (`cam_<id>`) with a unique MAC
+- ONVIF server binds to that IP on port 80 (standard ONVIF port)
+- FFmpeg still streams to shared mediamtx via the bridge network
+- NVR discovers each camera as a separate device on the LAN
+
+#### Limitations
+
+- **Linux only**: macvlan requires a real Linux kernel. Does not work on macOS Docker Desktop or Windows WSL2
+- **Same L2 network**: The host and NVR must be on the same physical network segment (same switch/subnet). Cloud VMs and Kubernetes do not support macvlan (MAC spoofing is blocked)
+- **Host cannot reach macvlan IPs**: By design, the Docker host cannot directly access macvlan container IPs. Use the Web UI (port 9999) to manage cameras
+- **DHCP lease time**: In DHCP mode, the router assigns IPs. If the container restarts, cameras may receive different IPs (unless the router has static DHCP leases by MAC)
+- **ARP isolation required**: Without `arp_ignore=1` + `arp_announce=2` on the host, all cameras will appear with the same MAC to the NVR
+
+### 🐳 Method 2: Docker Deployment
 
 ```bash
 # 1. Enter project directory
@@ -142,8 +224,7 @@ EXTERNAL_IP=192.168.1.100 docker compose up -d
 
 Instead of the inaccessible container IP (e.g., `rtsp://172.19.0.3:8554/camera-id`).
 
-
-### Method 2: Automated Deployment
+### Method 3: Automated Local Deployment
 
 ```bash
 # 1. Enter project directory
@@ -196,7 +277,8 @@ Taking UniFi Protect (6.2.88) as an example:
 1. Go to Devices page
 2. Click `?` icon, then click `try advanced adoption` (Or use AI Port)
 3. Enter:
-   - **IP Address**: `your-ip:onvif-port` (e.g., `192.168.0.87:12000`)
+   - **Standard mode** — IP Address: `host-ip:onvif-port` (e.g., `192.168.0.87:12000`)
+   - **Macvlan mode** — IP Address: `camera-ip` (e.g., `192.168.0.201`) — port 80 is implicit
    - **Username**: Any Username (e.g., `test`)
    - **Password**: Any password (e.g., `pass`)
 4. Click `Confirm`
