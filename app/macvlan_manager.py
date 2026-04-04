@@ -48,20 +48,21 @@ class MacvlanManager:
 
     def __init__(self, subnet: str, gateway: str, ip_start: str, ip_end: str,
                  parent_iface: str, use_dhcp: bool = False):
-        self.parent_iface = parent_iface
         self.use_dhcp = use_dhcp
+        # Resolve the actual interface name (auto-detect if configured name missing)
+        self.parent_iface = self._resolve_parent_iface(parent_iface)
 
         if not use_dhcp:
             self.subnet = ipaddress.ip_network(subnet, strict=False)
             self.prefix_len = self.subnet.prefixlen
             self._allocator = _IPAllocator(ip_start, ip_end)
             logger.info(
-                f"MacvlanManager initialized (static): parent={parent_iface}, "
+                f"MacvlanManager initialized (static): parent={self.parent_iface}, "
                 f"range={ip_start}-{ip_end}, prefix=/{self.prefix_len}"
             )
         else:
             logger.info(
-                f"MacvlanManager initialized (DHCP): parent={parent_iface}"
+                f"MacvlanManager initialized (DHCP): parent={self.parent_iface}"
             )
 
     def create_interface(self, camera_id: str) -> str:
@@ -216,6 +217,76 @@ class MacvlanManager:
             if line.startswith("inet "):
                 return line.split()[1].split("/")[0]
         raise Exception(f"No IPv4 address found on interface {iface}")
+
+    @staticmethod
+    def _resolve_parent_iface(configured: str) -> str:
+        """Return the configured interface if it exists, otherwise auto-detect.
+
+        Auto-detection strategy:
+        - The bridge network interface carries the default route (eth0 typically).
+        - The macvlan network interface is any other ethernet interface.
+        - We return the first non-default-route ethernet interface found.
+        """
+        # Check if configured interface exists
+        result = subprocess.run(["ip", "link", "show", configured],
+                                capture_output=True, text=True)
+        if result.returncode == 0:
+            logger.info(f"Using configured macvlan parent interface: {configured}")
+            return configured
+
+        logger.warning(
+            f"Configured MACVLAN_PARENT_IFACE '{configured}' not found, "
+            "auto-detecting macvlan interface..."
+        )
+
+        # Find the default route interface (bridge network)
+        route_result = subprocess.run(["ip", "route", "show", "default"],
+                                      capture_output=True, text=True)
+        default_iface = None
+        for line in route_result.stdout.splitlines():
+            parts = line.split()
+            if "dev" in parts:
+                default_iface = parts[parts.index("dev") + 1]
+                break
+
+        # List all UP ethernet interfaces
+        link_result = subprocess.run(["ip", "link", "show", "up"],
+                                     capture_output=True, text=True)
+        candidates = []
+        for line in link_result.stdout.splitlines():
+            # Lines look like: "2: eth0: <FLAGS> ..."
+            if ": <" not in line:
+                continue
+            iface = line.split(":")[1].strip()
+            # Skip loopback, docker bridges, veth pairs, and the default route iface
+            if iface in ("lo", default_iface):
+                continue
+            if any(iface.startswith(p) for p in ("lo", "docker", "br-", "veth", "virbr")):
+                continue
+            candidates.append(iface)
+
+        if candidates:
+            detected = candidates[0]
+            logger.info(
+                f"Auto-detected macvlan parent interface: {detected} "
+                f"(default route is on {default_iface})"
+            )
+            return detected
+
+        # Last resort: if only one interface exists (e.g. single-NIC macvlan),
+        # use eth0 as the parent (DHCP mode — no static IP on the macvlan iface)
+        if default_iface:
+            logger.warning(
+                f"No secondary interface found, falling back to default route "
+                f"interface: {default_iface}"
+            )
+            return default_iface
+
+        raise Exception(
+            f"Cannot find macvlan parent interface. "
+            f"Configured '{configured}' missing and auto-detection failed. "
+            f"Set MACVLAN_PARENT_IFACE to the correct interface name."
+        )
 
     @staticmethod
     def _iface_name(camera_id: str) -> str:
