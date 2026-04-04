@@ -420,56 +420,59 @@ ffmpeg -ss 00:00:02 -i video.mp4 \
 ## 📂 Directory Structure
 
 ```
-mock-onvif-camera/
-├── .venv/                  # Python virtual environment (created by uv)
-├── app/                    # Application modules
-│   ├── __init__.py         # Package initializer
-│   ├── app.py              # Flask main application
-│   ├── camera_manager.py   # Camera management logic
-│   ├── startup.py          # Dependency service startup
-│   ├── onvif_instance.py   # ONVIF instance management
-│   └── utils.py            # Utility functions
-├── static/                 # Frontend assets
-│   ├── index.html          # Web UI
-│   ├── app.js              # Frontend logic
-│   ├── styles.css          # Styles
-│   └── ulogo.png           # Logo image
-├── data/                   # Runtime data (created on first run)
-│   ├── videos/             # Uploaded video storage
-│   ├── snapshots/          # Camera snapshots/thumbnails (JPEG)
-│   ├── cameras/            # Camera configuration files (YAML)
-│   ├── ffmpeg_logs/        # FFmpeg process logs
-│   └── onvif_logs/         # ONVIF server logs
-├── mediamtx.yml            # mediamtx configuration (for macOS)
-├── onvif_server.py         # ONVIF server implementation
-├── requirements.txt        # Python dependencies
-├── run.py                  # Main startup script
-├── setup.sh                # Automated setup script (cross-platform)
-├── start.sh                # Quick start script (cross-platform)
-└── README.md
+mock-onvif-service/
+├── app/                         # Application modules
+│   ├── app.py                   # Flask routes
+│   ├── camera_manager.py        # Core logic: transcode, stream, ONVIF spawn, persistence
+│   ├── macvlan_manager.py       # Macvlan interface lifecycle + IP allocation
+│   ├── constants.py             # Validation ranges (resolution, FPS, bitrate)
+│   ├── utils.py                 # get_server_ip(), is_port_in_use()
+│   ├── log_manager.py           # Log rotation and retention
+│   ├── log_cleanup_scheduler.py # 24h log cleanup cycle
+│   └── startup.py               # Dependency service startup
+├── scripts/
+│   └── setup-macvlan-host.sh    # Host ARP isolation (run once, Linux only)
+├── static/                      # Frontend assets
+│   ├── index.html               # Web UI
+│   ├── app.js                   # Frontend logic
+│   └── styles.css               # Styles
+├── data/                        # Runtime data (created on first run)
+│   ├── videos/                  # Transcoded video files (named by camera UUID)
+│   ├── snapshots/               # Camera thumbnails (JPEG)
+│   └── cameras/                 # Camera config files (YAML, one per camera)
+├── logs/                        # Process logs (created on first run)
+│   ├── ffmpeg/                  # FFmpeg streaming process logs
+│   └── onvif/                   # ONVIF server process logs
+├── docker-compose.yml           # Base Docker Compose
+├── docker-compose.macvlan.yml   # Macvlan overlay (per-camera IP mode)
+├── mediamtx.yml                 # mediamtx config
+├── onvif_server.py              # Per-camera ONVIF Device/Media service
+├── run.py                       # Entry point
+├── setup.sh                     # First-time setup script
+├── start.sh                     # Quick start script
+└── Dockerfile
 ```
-
-### Generated Directories
-
-These directories are automatically created when you setup/run the service:
-
-- **`.venv/`**: Python virtual environment managed by uv
-- **`data/videos/`**: Stores uploaded video files (named by camera UUID)
-- **`data/snapshots/`**: Stores camera snapshots/thumbnails extracted from videos (first frame)
-- **`data/cameras/`**: Stores camera configuration YAML files
-- **`logs/ffmpeg/`**: Logs from FFmpeg streaming processes
-- **`logs/onvif/`**: Logs from ONVIF server instances
 
 ---
 
 ## 📊 Port Usage
 
+### Standard mode
+
 | Service | Port | Purpose |
 |---------|------|---------|
-| Flask Web UI | 9999 | Web management interface |
-| mediamtx RTSP | 8554 | RTSP streaming service |
+| Web UI | 9999 | Web management interface |
+| mediamtx RTSP | 8554 | RTSP streaming server |
 | ONVIF Camera 0 | 12000 | First camera's ONVIF service |
 | ONVIF Camera 1 | 12001 | Second camera's ONVIF service |
-| ONVIF Camera N | 12000+N | Nth camera's ONVIF service |
+| ONVIF Camera N | 12000+N | Up to 1000 cameras |
+
+### Macvlan mode
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| Web UI | 9999 | Web management interface (host bridge network) |
+| mediamtx RTSP | 8554 | RTSP streaming server (host bridge network) |
+| ONVIF per camera | 80 | Each camera binds to its own LAN IP on port 80 |
 
 ---
