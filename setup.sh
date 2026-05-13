@@ -215,7 +215,7 @@ echo "Step 2: Create directory structure"
 echo "-----------------------------------"
 
 mkdir -p data/videos
-mkdir -p data/cameras
+mkdir -p data/snapshots
 mkdir -p logs/onvif
 mkdir -p logs/ffmpeg
 mkdir -p static
