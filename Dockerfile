@@ -3,14 +3,23 @@
 # ── Builder ────────────────────────────────────────────────────────────────
 FROM python:3.13-slim AS builder
 
-ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1 \
+# Pull uv binary from the official Astral image — no install step, no pip bootstrap.
+COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /uvx /usr/local/bin/
+
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_PREFERENCE=only-system \
     PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /build
 COPY requirements.txt .
-RUN python -m venv /opt/venv \
- && /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
+# Create venv and install in one uv invocation (much faster than pip on ARM).
+# BuildKit cache mount keeps the uv wheel cache across builds — second build
+# of the same requirements is nearly instant. The cache is NOT baked into the
+# final image (mount lives only during this RUN).
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv venv /opt/venv --python 3.13 \
+ && uv pip install --python /opt/venv/bin/python -r requirements.txt
 
 # ── Runtime ────────────────────────────────────────────────────────────────
 FROM python:3.13-slim AS runtime
