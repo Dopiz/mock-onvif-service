@@ -28,12 +28,21 @@ FROM python:3.13-slim AS runtime
 #   ffmpeg          → transcode + RTSP push
 #   iproute2        → macvlan mode only (`ip link`)
 #   isc-dhcp-client → macvlan DHCP mode only
-RUN apt-get update \
+#
+# BuildKit cache mounts keep apt's deb cache across builds. The default
+# python:3.13-slim image runs `apt-get clean` after every install via
+# /etc/apt/apt.conf.d/docker-clean — remove it so the cache mount is actually
+# usable when the layer DOES need to rerun.
+RUN rm -f /etc/apt/apt.conf.d/docker-clean \
+ && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' \
+        > /etc/apt/apt.conf.d/keep-cache
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update \
  && apt-get install -y --no-install-recommends \
         ffmpeg \
         iproute2 \
-        isc-dhcp-client \
- && rm -rf /var/lib/apt/lists/*
+        isc-dhcp-client
 
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
