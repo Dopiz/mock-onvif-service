@@ -631,6 +631,18 @@ main {
     font-weight: 500;
 }
 
+/* macvlan batch card hint — the value is a call-to-action that opens the
+   per-camera modal (which lists each camera's IP). The card itself is
+   already clickable; this just signposts it. */
+.info-value.click-to-expand {
+    color: var(--accent-cyan);
+    font-style: italic;
+    letter-spacing: 0.02em;
+}
+.camera-card:hover .info-value.click-to-expand {
+    text-decoration: underline;
+}
+
 .camera-urls {
     display: flex;
     flex-direction: column;

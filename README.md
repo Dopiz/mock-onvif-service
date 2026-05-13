@@ -95,9 +95,27 @@ cp .env.example .env
 ```
 
 Edit `.env` to configure:
+
+**Server**
 - `SERVER_HOST`: Server host (default: `0.0.0.0`)
 - `SERVER_PORT`: Server port (default: `9999`)
 - `DEBUG_MODE`: Enable debug mode (default: `false`)
+- `EXTERNAL_IP`: Host IP advertised to NVRs (Docker only; see Method 2)
+
+**Upload & disk limits**
+- `MAX_UPLOAD_MB`: Largest single upload (default: `500`)
+- `MAX_VIDEO_SIZE_MB`: Largest transcoded output, hard rejected if exceeded (default: `1024`)
+- `DATA_CLEANUP_ENABLED`: Hourly orphan scanner for `data/videos` & `data/snapshots` (default: `true`)
+- `DATA_CLEANUP_INTERVAL_HOURS`: Scan interval (default: `1`)
+- `DATA_ORPHAN_GRACE_SECONDS`: Skip files newer than this (default: `300`)
+
+**Reliability**
+- `WATCHDOG_ENABLED`: Auto-restart dead FFmpeg / ONVIF subprocesses (default: `true`)
+- `WATCHDOG_INTERVAL_SECONDS`: Liveness check interval (default: `15`)
+- `WATCHDOG_MAX_RESTARTS`: Park a camera after N consecutive failed restarts (default: `5`)
+
+**ONVIF dispatcher (advanced, opt-in)**
+- `ONVIF_DISPATCHER_ENABLED`: Collapse N onvif_server.py subprocesses into a single in-process Flask + werkzeug-per-port server. Saves ~25 MB RSS per camera. Default: `false`.
 
 **Note**: For Docker deployment, you can also set these via environment variables in `docker-compose.yml` or pass them when running `docker compose up`.
 
@@ -369,6 +387,42 @@ curl -s http://localhost:9999/cameras | jq
 
 ---
 
+## 🛡️ Reliability & Disk Retention
+
+Four layers of bounds keep the service from filling the disk or leaving zombies behind.
+
+### Log retention
+
+| Layer | Location | Cap | Worst-case footprint |
+|---|---|---|---|
+| Docker daemon stdout | host `/var/lib/docker/.../*-json.log` | `json-file` driver, `max-size 50m`, `max-file 5` | ≤ 250 MB per container |
+| App FFmpeg log | `./logs/ffmpeg/ffmpeg_<id>.log` | `RotatingFileHandler` 3 MB × 4 | 12 MB per camera |
+| App ONVIF log | `./logs/onvif/onvif_<id>.log` | same as above | 12 MB per camera |
+| Disk-side sweep | `./logs/**` | 24-hour scan, delete files older than 3 days | — (belt + braces) |
+
+> **Production tip:** also set Docker daemon defaults in `/etc/docker/daemon.json` so any future container inherits the cap:
+> ```json
+> {"log-driver":"json-file","log-opts":{"max-size":"50m","max-file":"5"}}
+> ```
+
+### Video / snapshot retention
+
+- **Per-file size cap**: `MAX_VIDEO_SIZE_MB` (default `1024`). Transcoded outputs over the cap are deleted and the upload is rejected.
+- **Orphan scanner** (`app/data_cleaner.py`): every hour (and once at boot) it sweeps `data/videos/*.mp4` and `data/snapshots/*.jpg`. Anything not referenced by a row in `service.db` and older than `DATA_ORPHAN_GRACE_SECONDS` (default 5 min) is removed.
+- **Upload cap**: Flask `MAX_CONTENT_LENGTH` set from `MAX_UPLOAD_MB` (default `500`).
+
+### Process supervision
+
+- **Watchdog** (`app/watchdog.py`) checks every `WATCHDOG_INTERVAL_SECONDS` (default 15) whether each camera's FFmpeg + ONVIF subprocesses are still alive. Dead ones are respawned. A camera is parked after `WATCHDOG_MAX_RESTARTS` consecutive failures and logged loudly.
+- **Zombie reaping**: every FFmpeg / ONVIF subprocess teardown calls `waitpid` so long-running create/delete cycles don't accumulate defunct PIDs.
+- **Logger FD release**: per-camera rotating log handlers are explicitly closed on `delete_camera`, preventing the file-descriptor leak that long-lived deployments would otherwise suffer.
+
+### Persistence
+
+Camera metadata lives in **SQLite** (`data/service.db`). On startup, any legacy `data/cameras/*.yaml` is migrated automatically (idempotent — re-running is safe). The schema is created on first boot; no manual setup needed.
+
+---
+
 ## 🛠️ Performance Optimization
 
 ### Two-Stage Processing
@@ -421,36 +475,47 @@ ffmpeg -ss 00:00:02 -i video.mp4 \
 
 ```
 mock-onvif-service/
-├── app/                         # Application modules
-│   ├── app.py                   # Flask routes
-│   ├── camera_manager.py        # Core logic: transcode, stream, ONVIF spawn, persistence
-│   ├── macvlan_manager.py       # Macvlan interface lifecycle + IP allocation
-│   ├── constants.py             # Validation ranges (resolution, FPS, bitrate)
-│   ├── utils.py                 # get_server_ip(), is_port_in_use()
-│   ├── log_manager.py           # Log rotation and retention
-│   ├── log_cleanup_scheduler.py # 24h log cleanup cycle
-│   └── startup.py               # Dependency service startup
+├── app/                          # Application package
+│   ├── app.py                    # Flask routes + error handlers
+│   ├── config.py                 # Env-driven runtime config
+│   ├── constants.py              # Static validation ranges
+│   ├── exceptions.py             # Typed service exceptions
+│   ├── schemas.py                # Pydantic upload schemas
+│   ├── db.py                     # SQLite repository + YAML migration
+│   ├── camera_lifecycle.py       # Create / delete / restore (ExitStack-based)
+│   ├── camera_manager.py         # Backward-compat shim → camera_lifecycle
+│   ├── transcoder.py             # FFmpeg transcode + snapshot + size cap
+│   ├── ffmpeg_builder.py         # Single source of truth for FFmpeg cmds
+│   ├── port_allocator.py         # Thread-safe ONVIF port allocator
+│   ├── process_supervisor.py     # Subprocess spawn/log-pipe/terminate/reap
+│   ├── macvlan_manager.py        # macvlan interface lifecycle + IP pool
+│   ├── onvif_handlers.py         # Pure SOAP response builders
+│   ├── onvif_dispatcher.py       # Single in-process ONVIF (opt-in)
+│   ├── watchdog.py               # Auto-restart dead FFmpeg/ONVIF
+│   ├── log_manager.py            # Rotating file handler + FD cleanup
+│   ├── log_cleanup_scheduler.py  # 24h disk-side log retention
+│   ├── data_cleaner.py           # Hourly orphan mp4/jpg scanner
+│   ├── startup.py                # Background service bootstrap
+│   └── utils.py                  # get_server_ip() etc.
 ├── scripts/
-│   └── setup-macvlan-host.sh    # Host ARP isolation (run once, Linux only)
-├── static/                      # Frontend assets
-│   ├── index.html               # Web UI
-│   ├── app.js                   # Frontend logic
-│   └── styles.css               # Styles
-├── data/                        # Runtime data (created on first run)
-│   ├── videos/                  # Transcoded video files (named by camera UUID)
-│   ├── snapshots/               # Camera thumbnails (JPEG)
-│   └── cameras/                 # Camera config files (YAML, one per camera)
-├── logs/                        # Process logs (created on first run)
-│   ├── ffmpeg/                  # FFmpeg streaming process logs
-│   └── onvif/                   # ONVIF server process logs
-├── docker-compose.yml           # Base Docker Compose
-├── docker-compose.macvlan.yml   # Macvlan overlay (per-camera IP mode)
-├── mediamtx.yml                 # mediamtx config
-├── onvif_server.py              # Per-camera ONVIF Device/Media service
-├── run.py                       # Entry point
-├── setup.sh                     # First-time setup script
-├── start.sh                     # Quick start script
-└── Dockerfile
+│   └── setup-macvlan-host.sh     # Host ARP isolation (run once, Linux only)
+├── static/                       # Frontend (Web UI)
+├── data/                         # Runtime data (created on first run)
+│   ├── service.db                # SQLite — durable camera metadata (single source of truth)
+│   ├── videos/                   # Transcoded mp4 files
+│   └── snapshots/                # Camera thumbnails (JPEG)
+├── logs/                         # Process logs (created on first run)
+│   ├── ffmpeg/                   # FFmpeg streaming logs (3MB × 4 per camera)
+│   └── onvif/                    # ONVIF server logs (3MB × 4 per camera)
+├── docker-compose.yml            # Base Docker Compose (logging caps, resource limits)
+├── docker-compose.macvlan.yml    # Macvlan overlay (per-camera IP mode)
+├── Dockerfile                    # Multi-stage build, non-root runtime
+├── mediamtx.yml                  # mediamtx config
+├── onvif_server.py               # Per-camera ONVIF subprocess (default mode)
+├── run.py                        # Entry point
+├── setup.sh                      # First-time local setup
+├── start.sh                      # Quick start (local)
+└── REVIEW_REPORT.html            # Code review + implementation status report
 ```
 
 ---
