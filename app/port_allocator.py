@@ -4,14 +4,14 @@ from __future__ import annotations
 import socket
 from threading import Lock
 
-from app.config import ONVIF_PORT_MAX, ONVIF_PORT_MIN
+from app.config import ONVIF_PORT_MAX, ONVIF_PORT_MIN, PORT_PROBE_TIMEOUT_SECONDS
 from app.exceptions import PortAllocationError
 
 
 def _is_port_in_use(port: int, host: str = "127.0.0.1") -> bool:
     """Probe whether a TCP port is bound right now. Best-effort; subject to TOCTOU."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(0.1)
+        s.settimeout(PORT_PROBE_TIMEOUT_SECONDS)
         try:
             return s.connect_ex((host, port)) == 0
         except OSError:
@@ -57,8 +57,15 @@ class PortAllocator:
             self._used.discard(port)
 
 
-_default = PortAllocator()
+# ── Singleton accessor (lazy, double-checked locking) ──────────────────────
+_default: PortAllocator | None = None
+_default_lock = Lock()
 
 
 def get_default_allocator() -> PortAllocator:
+    global _default
+    if _default is None:
+        with _default_lock:
+            if _default is None:
+                _default = PortAllocator()
     return _default

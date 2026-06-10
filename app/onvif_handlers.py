@@ -7,6 +7,14 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
+from xml.sax.saxutils import escape
+
+from app.constants import (
+    SUB_PROFILE_BITRATE_KBPS,
+    SUB_PROFILE_FPS,
+    SUB_PROFILE_HEIGHT,
+    SUB_PROFILE_WIDTH,
+)
 
 
 @dataclass
@@ -36,13 +44,6 @@ class OnvifContext:
     @property
     def hardware_id(self) -> str:
         return f"dopiz-{self.camera_id[:8]}"
-
-
-# Fixed 480p sub-profile parameters
-SUB_PROFILE_WIDTH = 854
-SUB_PROFILE_HEIGHT = 480
-SUB_PROFILE_FPS = 24
-SUB_PROFILE_BITRATE_KBPS = 1024
 
 
 def _envelope(body: str) -> str:
@@ -98,13 +99,15 @@ def extract_ws_security(xml_data: str) -> tuple[Optional[str], Optional[str]]:
 
 # ── Device service ─────────────────────────────────────────────────────────
 def get_device_information(ctx: OnvifContext) -> str:
+    # manufacturer is user-supplied; everything interpolated here is escaped so
+    # the SOAP XML cannot be broken (or injected into) by hostile values.
     body = (
         "<tds:GetDeviceInformationResponse>"
-        f"<tds:Manufacturer>{ctx.manufacturer}</tds:Manufacturer>"
-        f"<tds:Model>{ctx.model}</tds:Model>"
+        f"<tds:Manufacturer>{escape(ctx.manufacturer)}</tds:Manufacturer>"
+        f"<tds:Model>{escape(ctx.model)}</tds:Model>"
         "<tds:FirmwareVersion>1.0.2</tds:FirmwareVersion>"
-        f"<tds:SerialNumber>{ctx.serial_number}</tds:SerialNumber>"
-        f"<tds:HardwareId>{ctx.hardware_id}</tds:HardwareId>"
+        f"<tds:SerialNumber>{escape(ctx.serial_number)}</tds:SerialNumber>"
+        f"<tds:HardwareId>{escape(ctx.hardware_id)}</tds:HardwareId>"
         "</tds:GetDeviceInformationResponse>"
     )
     return _envelope(body)
@@ -158,7 +161,7 @@ def get_services(server_ip: str, port: int) -> str:
 
 # ── Media service ──────────────────────────────────────────────────────────
 def _build_profile_xml(ctx: OnvifContext, token: str, name: str,
-                      width: int, height: int, fps, vkbps: int,
+                      width: int, height: int, fps: float, vkbps: int,
                       vsource_token: str, vencoder_token: str) -> str:
     return (
         f'<trt:Profiles token="{token}" fixed="true">'
@@ -195,7 +198,7 @@ def get_profiles(ctx: OnvifContext) -> str:
                             "VideoSource_1", "VideoEncoder_1")
     p2 = ""
     if ctx.sub_profile:
-        p2 = _build_profile_xml(ctx, "Profile_2", "SubProfile_480p",
+        p2 = _build_profile_xml(ctx, "Profile_2", "SubProfile_360p",
                                 SUB_PROFILE_WIDTH, SUB_PROFILE_HEIGHT,
                                 SUB_PROFILE_FPS, SUB_PROFILE_BITRATE_KBPS,
                                 "VideoSource_2", "VideoEncoder_2")

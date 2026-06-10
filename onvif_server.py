@@ -4,17 +4,19 @@
 In the default deployment each camera spawns one of these. Set
 ``ONVIF_DISPATCHER_ENABLED=true`` to switch to the in-process dispatcher
 (:mod:`app.onvif_dispatcher`) and skip this subprocess entirely.
+
+Routes are shared with the dispatcher via :mod:`app.onvif_http`.
 """
 from __future__ import annotations
 
 import logging
 import os
 import sys
-from pathlib import Path
 
-from flask import Flask, Response, request, send_file
+from flask import Flask
 
-from app.onvif_handlers import OnvifContext, dispatch_device, dispatch_media
+from app.onvif_handlers import OnvifContext
+from app.onvif_http import register_onvif_routes
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,55 +46,7 @@ ctx = OnvifContext(
 )
 
 app = Flask(__name__)
-
-
-def _extract_host_port() -> tuple[str, int]:
-    host = request.host
-    if ":" in host:
-        ip, port_s = host.rsplit(":", 1)
-        try:
-            return ip, int(port_s)
-        except ValueError:
-            return ip, 80
-    return host, 80
-
-
-@app.route("/onvif/device_service", methods=["POST"])
-def device_service():
-    xml_data = request.data.decode("utf-8", errors="ignore")
-    ip, port = _extract_host_port()
-    body = dispatch_device(ctx, xml_data, ip, port)
-    logger.info("[Device] %s from %s", request.path, request.remote_addr)
-    return Response(body, mimetype="application/soap+xml")
-
-
-@app.route("/onvif/media_service", methods=["POST"])
-def media_service():
-    xml_data = request.data.decode("utf-8", errors="ignore")
-    ip, port = _extract_host_port()
-    body = dispatch_media(ctx, xml_data, ip, port)
-    logger.info("[Media] %s from %s", request.path, request.remote_addr)
-    return Response(body, mimetype="application/soap+xml")
-
-
-@app.route("/onvif/device_service.wsdl", methods=["GET"])
-@app.route("/onvif/media_service.wsdl", methods=["GET"])
-def wsdl():
-    return Response('<?xml version="1.0"?><definitions/>', mimetype="text/xml")
-
-
-@app.route("/snapshot.jpg", methods=["GET"])
-def snapshot():
-    snap_id = SHARED_VIDEO_ID or CAMERA_ID
-    path = Path(f"./data/snapshots/{snap_id}.jpg")
-    if path.exists():
-        return send_file(str(path), mimetype="image/jpeg")
-    return Response("Snapshot not available", status=404)
-
-
-@app.route("/health", methods=["GET"])
-def health():
-    return {"status": "ok", "camera_id": CAMERA_ID}
+register_onvif_routes(app, lambda: ctx)
 
 
 def main() -> None:

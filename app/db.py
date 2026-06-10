@@ -5,18 +5,20 @@ A migration step on startup imports any pre-existing ``data/cameras/*.yaml``.
 """
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import sqlite3
 import threading
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import yaml
 
-from app.config import CAMERAS_DIR, DB_PATH
+from app.config import CAMERAS_DIR, DB_PATH, VIDEOS_DIR
 from app.exceptions import PersistenceError
+from app.schemas import VideoParams
 
 logger = logging.getLogger(__name__)
 
@@ -65,9 +67,20 @@ class CameraRecord:
             camera_ip=row["camera_ip"],
         )
 
-    def to_dict(self) -> dict:
-        d = asdict(self)
-        return d
+    def parsed_params(self) -> VideoParams:
+        """Return ``video_params`` as a validated :class:`VideoParams` model."""
+        return VideoParams(**self.video_params)
+
+
+def _wrap_db_errors(fn):
+    """Convert sqlite3 errors into the service-level PersistenceError."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except sqlite3.DatabaseError as e:
+            raise PersistenceError(f"DB {fn.__name__} failed: {e}") from e
+    return wrapper
 
 
 class CameraRepository:
@@ -92,47 +105,44 @@ class CameraRepository:
             self._conn.executescript(_SCHEMA)
 
     # ── CRUD ────────────────────────────────────────────────────────────────
+    @_wrap_db_errors
     def upsert(self, rec: CameraRecord) -> None:
-        try:
-            with self._lock:
-                self._conn.execute(
-                    """
-                    INSERT INTO cameras (camera_id, video_path, onvif_port, camera_ip,
-                                         shared_video_id, sub_profile, manufacturer,
-                                         created_at, video_params)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(camera_id) DO UPDATE SET
-                        video_path     = excluded.video_path,
-                        onvif_port     = excluded.onvif_port,
-                        camera_ip      = excluded.camera_ip,
-                        shared_video_id= excluded.shared_video_id,
-                        sub_profile    = excluded.sub_profile,
-                        manufacturer   = excluded.manufacturer,
-                        created_at     = excluded.created_at,
-                        video_params   = excluded.video_params
-                    """,
-                    (
-                        rec.camera_id,
-                        rec.video_path,
-                        rec.onvif_port,
-                        rec.camera_ip,
-                        rec.shared_video_id,
-                        int(rec.sub_profile),
-                        rec.manufacturer,
-                        rec.created_at,
-                        json.dumps(rec.video_params),
-                    ),
-                )
-        except sqlite3.DatabaseError as e:
-            raise PersistenceError(f"DB upsert failed: {e}") from e
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO cameras (camera_id, video_path, onvif_port, camera_ip,
+                                     shared_video_id, sub_profile, manufacturer,
+                                     created_at, video_params)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(camera_id) DO UPDATE SET
+                    video_path     = excluded.video_path,
+                    onvif_port     = excluded.onvif_port,
+                    camera_ip      = excluded.camera_ip,
+                    shared_video_id= excluded.shared_video_id,
+                    sub_profile    = excluded.sub_profile,
+                    manufacturer   = excluded.manufacturer,
+                    created_at     = excluded.created_at,
+                    video_params   = excluded.video_params
+                """,
+                (
+                    rec.camera_id,
+                    rec.video_path,
+                    rec.onvif_port,
+                    rec.camera_ip,
+                    rec.shared_video_id,
+                    int(rec.sub_profile),
+                    rec.manufacturer,
+                    rec.created_at,
+                    json.dumps(rec.video_params),
+                ),
+            )
 
+    @_wrap_db_errors
     def delete(self, camera_id: str) -> None:
-        try:
-            with self._lock:
-                self._conn.execute("DELETE FROM cameras WHERE camera_id = ?", (camera_id,))
-        except sqlite3.DatabaseError as e:
-            raise PersistenceError(f"DB delete failed: {e}") from e
+        with self._lock:
+            self._conn.execute("DELETE FROM cameras WHERE camera_id = ?", (camera_id,))
 
+    @_wrap_db_errors
     def get(self, camera_id: str) -> Optional[CameraRecord]:
         with self._lock:
             row = self._conn.execute(
@@ -140,23 +150,27 @@ class CameraRepository:
             ).fetchone()
         return CameraRecord.from_row(row) if row else None
 
+    @_wrap_db_errors
     def all(self) -> list[CameraRecord]:
         with self._lock:
             rows = self._conn.execute("SELECT * FROM cameras ORDER BY created_at ASC").fetchall()
         return [CameraRecord.from_row(r) for r in rows]
 
+    @_wrap_db_errors
     def update_onvif_port(self, camera_id: str, port: int) -> None:
         with self._lock:
             self._conn.execute(
                 "UPDATE cameras SET onvif_port = ? WHERE camera_id = ?", (port, camera_id)
             )
 
+    @_wrap_db_errors
     def update_camera_ip(self, camera_id: str, ip: str) -> None:
         with self._lock:
             self._conn.execute(
                 "UPDATE cameras SET camera_ip = ? WHERE camera_id = ?", (ip, camera_id)
             )
 
+    @_wrap_db_errors
     def count_using_shared_video(self, shared_video_id: str, exclude_id: str | None = None) -> int:
         with self._lock:
             sql = "SELECT COUNT(*) FROM cameras WHERE shared_video_id = ?"
@@ -175,8 +189,8 @@ class CameraRepository:
 def migrate_yaml_configs(repo: CameraRepository, configs_dir: Path = CAMERAS_DIR) -> int:
     """Import legacy ``config_*.yaml`` files into the SQLite repo.
 
-    Returns the number of records imported. YAML files are kept in place but
-    are ignored on subsequent boots once the camera_id exists in the DB.
+    Returns the number of records imported. Each YAML file is deleted after a
+    successful import; once the directory is empty it is removed entirely.
     """
     if not configs_dir.exists():
         return 0
@@ -198,7 +212,6 @@ def migrate_yaml_configs(repo: CameraRepository, configs_dir: Path = CAMERAS_DIR
                 continue
 
             shared = cfg.get("shared_video_id")
-            from app.config import VIDEOS_DIR  # local import to avoid cycle at module load
             video_file = (VIDEOS_DIR / f"{shared}_shared.mp4") if shared else (VIDEOS_DIR / f"{camera_id}.mp4")
 
             rec = CameraRecord(

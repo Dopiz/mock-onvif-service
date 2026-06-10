@@ -1,10 +1,15 @@
 """Watchdog: periodically check that each camera's FFmpeg/ONVIF subprocess is
 still alive and re-spawn it if not.
 
-Backoff: per-camera restart counter resets when uptime > 5 minutes. After
-``WATCHDOG_MAX_RESTARTS`` consecutive failures the camera is parked (no further
+Backoff: every restart *attempt* (successful or failed) increments a per-camera
+counter; the counter resets once the camera has gone
+``WATCHDOG_RESTART_COOLDOWN_SECONDS`` without another attempt. After
+``WATCHDOG_MAX_RESTARTS`` consecutive attempts the camera is parked (no further
 auto-restart) — it remains in the registry but is logged loudly so a human
 can investigate.
+
+ONVIF liveness/restart is delegated to the active :mod:`app.onvif_endpoint`
+strategy; in dispatcher mode there is no subprocess, so nothing to check.
 """
 from __future__ import annotations
 
@@ -15,18 +20,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from app.camera_lifecycle import RuntimeState, get_registry
 from app.config import (
-    MEDIAMTX_RTSP_PORT,
+    WATCHDOG_INTERVAL_SECONDS,
     WATCHDOG_MAX_RESTARTS,
+    WATCHDOG_RESTART_COOLDOWN_SECONDS,
 )
-from app.process_supervisor import (
-    is_process_alive,
-    release_camera_loggers,
-    start_ffmpeg,
-    start_onvif_subprocess,
-)
-from app.utils import get_server_ip
+from app.onvif_endpoint import get_onvif_endpoint
+from app.process_supervisor import is_process_alive, start_ffmpeg
+from app.runtime_registry import RuntimeState, get_registry
 
 logger = logging.getLogger(__name__)
 
@@ -72,67 +73,50 @@ def _restart_ffmpeg_sub(state: RuntimeState) -> bool:
     return True
 
 
-def _restart_onvif(state: RuntimeState) -> bool:
-    rec = state.record
-    rtsp_url = f"rtsp://{get_server_ip()}:{MEDIAMTX_RTSP_PORT}/{rec.camera_id}"
-    try:
-        # Release stale log handlers — start_onvif_subprocess will recreate them
-        release_camera_loggers(rec.camera_id)
-        state.onvif_pid = start_onvif_subprocess(
-            camera_id=rec.camera_id,
-            onvif_port=rec.onvif_port,
-            rtsp_url=rtsp_url,
-            width=state.width,
-            height=state.height,
-            fps=state.fps,
-            video_bitrate_kbps=state.video_bitrate_kbps,
-            audio_bitrate_kbps=int(rec.video_params.get("audio_bitrate", "128k").rstrip("k")),
-            shared_video_id=rec.shared_video_id,
-            sub_profile=rec.sub_profile,
-            camera_name=rec.manufacturer,
-            camera_ip=rec.camera_ip,
-        )
-    except Exception as e:
-        logger.error("Watchdog: failed to restart ONVIF for %s: %s", rec.camera_id[:8], e)
-        return False
-    return True
-
-
 def _check_once() -> None:
     registry = get_registry()
+    endpoint = get_onvif_endpoint()
     now = time.monotonic()
     for state in registry.all():
-        cam_id = state.record.camera_id
-        tracker = _trackers.setdefault(cam_id, _RestartTracker())
+        camera_id = state.record.camera_id
+        tracker = _trackers.setdefault(camera_id, _RestartTracker())
         if tracker.parked:
             continue
 
-        # Cool the counter if last restart was long ago
-        if tracker.count and now - tracker.last_restart_ts > 300:
+        # Cool the counter if the last attempt was long ago
+        if tracker.count and now - tracker.last_restart_ts > WATCHDOG_RESTART_COOLDOWN_SECONDS:
             tracker.count = 0
 
         if tracker.count >= WATCHDOG_MAX_RESTARTS:
             tracker.parked = True
-            logger.error("Watchdog: camera %s parked after %d failed restarts",
-                         cam_id[:8], tracker.count)
+            logger.error("Watchdog: camera %s parked after %d restart attempts",
+                         camera_id[:8], tracker.count)
             continue
 
-        needs_restart = False
-        if not is_process_alive(state.ffmpeg_pid):
-            logger.warning("Watchdog: ffmpeg dead for %s — restarting", cam_id[:8])
-            if _restart_ffmpeg_main(state):
-                needs_restart = True
-        if state.ffmpeg_pid_sub and not is_process_alive(state.ffmpeg_pid_sub):
-            logger.warning("Watchdog: sub-ffmpeg dead for %s — restarting", cam_id[:8])
-            if _restart_ffmpeg_sub(state):
-                needs_restart = True
-        # ONVIF subprocess check only meaningful in subprocess mode (PID > 0)
-        if state.onvif_pid and not is_process_alive(state.onvif_pid):
-            logger.warning("Watchdog: ONVIF dead for %s — restarting", cam_id[:8])
-            if _restart_onvif(state):
-                needs_restart = True
+        restarted = False
+        restart_failed = False
 
-        if needs_restart:
+        if not is_process_alive(state.ffmpeg_pid):
+            logger.warning("Watchdog: ffmpeg dead for %s — restarting", camera_id[:8])
+            if _restart_ffmpeg_main(state):
+                restarted = True
+            else:
+                restart_failed = True
+        if state.ffmpeg_pid_sub and not is_process_alive(state.ffmpeg_pid_sub):
+            logger.warning("Watchdog: sub-ffmpeg dead for %s — restarting", camera_id[:8])
+            if _restart_ffmpeg_sub(state):
+                restarted = True
+            else:
+                restart_failed = True
+        if not endpoint.is_alive(state):
+            logger.warning("Watchdog: ONVIF dead for %s — restarting", camera_id[:8])
+            if endpoint.restart(state):
+                restarted = True
+            else:
+                restart_failed = True
+
+        # Count failed attempts too, so persistently-broken cameras eventually park.
+        if restarted or restart_failed:
             tracker.count += 1
             tracker.last_restart_ts = now
 
@@ -153,7 +137,7 @@ def _loop(interval: int) -> None:
     logger.info("Watchdog stopped")
 
 
-def start_watchdog(interval: int = 15) -> None:
+def start_watchdog(interval: int = WATCHDOG_INTERVAL_SECONDS) -> None:
     global _thread
     if _thread is not None and _thread.is_alive():
         return

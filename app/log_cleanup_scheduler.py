@@ -1,11 +1,15 @@
-"""
-Scheduled log cleanup service.
+"""Scheduled log cleanup service.
+
 Runs periodic cleanup of old log files using a stoppable Event-based wait.
+Configuration (logs dir, interval) is read from :mod:`app.config`.
 """
+from __future__ import annotations
+
 import logging
 import threading
-from pathlib import Path
+from typing import Optional
 
+from app.config import LOG_CLEANUP_INTERVAL_HOURS, LOGS_DIR
 from app.log_manager import LogManager
 
 logger = logging.getLogger(__name__)
@@ -14,18 +18,19 @@ logger = logging.getLogger(__name__)
 class LogCleanupScheduler:
     """Scheduler for periodic log cleanup."""
 
-    def __init__(self, logs_dir, interval_hours=24):
-        self.logs_dir = Path(logs_dir)
-        self.interval_seconds = interval_hours * 3600
+    def __init__(self, logs_dir=LOGS_DIR, interval_hours: float = LOG_CLEANUP_INTERVAL_HOURS) -> None:
+        self.logs_dir = logs_dir
+        self.interval_seconds: float = interval_hours * 3600
         self._stop_event = threading.Event()
-        self.thread = None
+        self.thread: Optional[threading.Thread] = None
 
     @property
-    def running(self):
+    def running(self) -> bool:
         return self.thread is not None and self.thread.is_alive() and not self._stop_event.is_set()
 
-    def _cleanup_loop(self):
-        logger.info("Log cleanup scheduler started (runs every %.0f hours)", self.interval_seconds / 3600)
+    def _cleanup_loop(self) -> None:
+        logger.info("Log cleanup scheduler started (runs every %.0f hours)",
+                    self.interval_seconds / 3600)
         while not self._stop_event.is_set():
             # Wait returns True if Event was set (stop requested), False on timeout
             if self._stop_event.wait(self.interval_seconds):
@@ -37,7 +42,7 @@ class LogCleanupScheduler:
                 logger.warning("Error in log cleanup scheduler: %s", e)
         logger.info("Log cleanup scheduler loop exited")
 
-    def start(self):
+    def start(self) -> None:
         if self.running:
             logger.warning("Log cleanup scheduler already running")
             return
@@ -57,7 +62,7 @@ class LogCleanupScheduler:
         except Exception as e:
             logger.warning("Error in initial cleanup: %s", e)
 
-    def stop(self):
+    def stop(self) -> None:
         if not self.thread:
             return
         logger.info("Stopping log cleanup scheduler")
@@ -67,31 +72,27 @@ class LogCleanupScheduler:
         self.thread = None
         logger.info("Log cleanup scheduler stopped")
 
-    def get_status(self):
-        return {
-            "running": self.running,
-            "interval_hours": self.interval_seconds / 3600,
-            "thread_alive": self.thread.is_alive() if self.thread else False,
-        }
+
+# ── Singleton accessor (lazy, double-checked locking) ──────────────────────
+_scheduler: Optional[LogCleanupScheduler] = None
+_scheduler_lock = threading.Lock()
 
 
-_scheduler = None
-
-
-def get_scheduler(logs_dir="./logs", interval_hours=24):
+def get_scheduler() -> LogCleanupScheduler:
     global _scheduler
     if _scheduler is None:
-        _scheduler = LogCleanupScheduler(logs_dir, interval_hours)
+        with _scheduler_lock:
+            if _scheduler is None:
+                _scheduler = LogCleanupScheduler()
     return _scheduler
 
 
-def start_log_cleanup_scheduler(logs_dir="./logs", interval_hours=24):
-    scheduler = get_scheduler(logs_dir, interval_hours)
+def start_log_cleanup_scheduler() -> LogCleanupScheduler:
+    scheduler = get_scheduler()
     scheduler.start()
     return scheduler
 
 
-def stop_log_cleanup_scheduler():
-    global _scheduler
-    if _scheduler:
+def stop_log_cleanup_scheduler() -> None:
+    if _scheduler is not None:
         _scheduler.stop()

@@ -63,11 +63,11 @@ def main() -> None:
     from app.config import DEBUG_MODE, SERVER_HOST, SERVER_PORT, ensure_dirs
     ensure_dirs()
 
-    from app.startup import startup_dependencies
+    from app.startup import start_background_services
     from app.camera_lifecycle import restore_cameras
     from app.app import app
 
-    startup_dependencies()
+    start_background_services()
     restore_cameras()
 
     logger.info("Starting HTTP server on %s:%d (debug=%s)", SERVER_HOST, SERVER_PORT, DEBUG_MODE)
