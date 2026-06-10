@@ -79,15 +79,6 @@ body::before {
     gap: 1rem;
 }
 
-.logo-img {
-    width: auto;
-    height: 80px;
-    margin: 8px;
-    object-fit: contain;
-    filter: drop-shadow(0 0 8px rgba(0, 240, 255, 0.5));
-    animation: pulse 4s ease-in-out infinite;
-}
-
 .logo svg {
     color: var(--accent-cyan);
     filter: drop-shadow(0 0 8px var(--accent-cyan));
@@ -116,44 +107,6 @@ body::before {
     -webkit-text-fill-color: transparent;
     background-clip: text;
     text-shadow: 0 0 30px rgba(0, 240, 255, 0.3);
-}
-
-.status-indicator {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem 1.25rem;
-    background: rgba(16, 185, 129, 0.1);
-    border: 1px solid var(--success);
-    border-radius: 4px;
-    font-weight: 600;
-    letter-spacing: 0.1em;
-    font-size: 0.875rem;
-}
-
-.status-dot {
-    width: 8px;
-    height: 8px;
-    background: var(--success);
-    border-radius: 50%;
-    animation: blink 1.5s ease-in-out infinite;
-    box-shadow: 0 0 10px var(--success);
-}
-
-@keyframes blink {
-
-    0%,
-    100% {
-        opacity: 1;
-    }
-
-    50% {
-        opacity: 0.3;
-    }
-}
-
-.status-text {
-    color: var(--success);
 }
 
 /* Sections */
@@ -478,6 +431,14 @@ main {
     }
 }
 
+/* Card removal animation (applied from JS on terminate) */
+@keyframes slideOut {
+    to {
+        opacity: 0;
+        transform: translateX(-20px);
+    }
+}
+
 .camera-card::before {
     content: '';
     position: absolute;
@@ -577,29 +538,6 @@ main {
     border-color: var(--text-dim);
 }
 
-.camera-status {
-    padding: 0.25rem 0.75rem;
-    background: rgba(16, 185, 129, 0.1);
-    border: 1px solid var(--success);
-    border-radius: 4px;
-    font-size: 0.75rem;
-    font-weight: 600;
-    letter-spacing: 0.1em;
-    color: var(--success);
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-}
-
-.camera-status::before {
-    content: '';
-    width: 6px;
-    height: 6px;
-    background: var(--success);
-    border-radius: 50%;
-    animation: blink 1.5s ease-in-out infinite;
-}
-
 .camera-info {
     display: flex;
     flex-direction: column;
@@ -683,8 +621,7 @@ main {
     white-space: nowrap;
 }
 
-.copy-btn,
-.open-btn {
+.copy-btn {
     background: none;
     border: none;
     color: var(--accent-cyan);
@@ -697,24 +634,14 @@ main {
     text-decoration: none;
 }
 
-.copy-btn:hover,
-.open-btn:hover {
+.copy-btn:hover {
     color: var(--accent-blue);
     transform: scale(1.1);
 }
 
-.copy-btn svg,
-.open-btn svg {
+.copy-btn svg {
     width: 18px;
     height: 18px;
-}
-
-.open-btn {
-    color: var(--accent-green);
-}
-
-.open-btn:hover {
-    color: #00ff88;
 }
 
 .camera-actions {
@@ -723,6 +650,11 @@ main {
 }
 
 /* Batch Camera Card - consistent with single camera */
+.batch-camera-card {
+    /* whole card opens the batch modal */
+    cursor: pointer;
+}
+
 .batch-camera-card .camera-header {
     display: flex;
     justify-content: space-between;
@@ -1418,17 +1350,6 @@ main {
     font-size: 0.875rem;
 }
 
-.modal-note {
-    color: var(--text-dim);
-    font-size: 0.85rem;
-    font-style: italic;
-    margin-bottom: 2rem;
-    padding: 0.75rem;
-    background: rgba(0, 240, 255, 0.05);
-    border-left: 3px solid var(--accent-cyan);
-    border-radius: 4px;
-}
-
 /* Camera Count Section */
 .camera-count-section {
     margin-bottom: 1.5rem;
@@ -1498,12 +1419,6 @@ main {
     color: var(--text-dim);
 }
 
-.camera-name-hint {
-    color: var(--text-dim);
-    font-size: 0.75rem;
-    font-style: italic;
-}
-
 /* Quality Section */
 .quality-section {
     margin-bottom: 1.25rem;
@@ -1559,17 +1474,6 @@ main {
     font-size: 0.9rem;
     color: var(--text-secondary);
     font-weight: 400;
-}
-
-.quality-section .modal-note {
-    color: var(--text-dim);
-    font-size: 0.85rem;
-    font-style: italic;
-    margin-bottom: 1.5rem;
-    padding: 0.75rem;
-    background: rgba(0, 240, 255, 0.05);
-    border-left: 3px solid var(--accent-cyan);
-    border-radius: 4px;
 }
 
 #originalResolution {
@@ -1754,11 +1658,6 @@ main {
 .preset-desc {
     color: var(--text-secondary);
     font-size: 0.8rem;
-}
-
-.preset-detail {
-    color: var(--text-dim);
-    font-size: 0.85rem;
 }
 
 .modal-actions {
