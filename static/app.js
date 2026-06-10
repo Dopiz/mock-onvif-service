@@ -1512,7 +1512,9 @@ function createBatchCameraCard(cameras, sharedVideoId) {
     const sortedCameras = [...cameras].sort((a, b) => a.onvif_port - b.onvif_port);
     const firstCamera = sortedCameras[0];
 
-    // Get port range
+    // macvlan: every camera shares port 80, ports differ only by IP, so a "port
+    // range" is meaningless. Show "Click to check" pointing into the modal.
+    const isMacvlan = !!firstCamera.camera_ip;
     const minPort = sortedCameras[0].onvif_port;
     const maxPort = sortedCameras[sortedCameras.length - 1].onvif_port;
 
@@ -1525,6 +1527,30 @@ function createBatchCameraCard(cameras, sharedVideoId) {
         resolutionBadges += ' <span class="preset-badge preset-sub">+ SUB</span>';
     }
 
+    const infoRows = isMacvlan ? `
+                <div class="info-row">
+                    <span class="info-label">NAME</span>
+                    <span class="info-value">${firstCamera.manufacturer || 'MockONVIF'}</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">ONVIF PORT</span>
+                    <span class="info-value">80</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">CAMERA IP</span>
+                    <span class="info-value click-to-expand">Click to check</span>
+                </div>
+    ` : `
+                <div class="info-row">
+                    <span class="info-label">NAME</span>
+                    <span class="info-value">${firstCamera.manufacturer || 'MockONVIF'}</span>
+                </div>
+                <div class="info-row">
+                    <span class="info-label">ONVIF PORT</span>
+                    <span class="info-value">${minPort} - ${maxPort}</span>
+                </div>
+    `;
+
     return `
         <div class="camera-card batch-camera-card" data-batch-id="${sharedVideoId}">
             <div class="camera-header">
@@ -1535,16 +1561,7 @@ function createBatchCameraCard(cameras, sharedVideoId) {
                 <span class="batch-count-badge">x${count}</span>
             </div>
 
-            <div class="camera-info">
-                <div class="info-row">
-                    <span class="info-label">NAME</span>
-                    <span class="info-value">${firstCamera.manufacturer || 'MockONVIF'}</span>
-                </div>
-                <div class="info-row">
-                    <span class="info-label">ONVIF PORT</span>
-                    <span class="info-value">${minPort} - ${maxPort}</span>
-                </div>
-            </div>
+            <div class="camera-info">${infoRows}</div>
 
             <div class="camera-urls">
                 <div class="url-item">
@@ -1816,6 +1833,11 @@ function showBatchCamerasModal(batchId, cameras) {
 // Create individual camera item for batch modal
 function createBatchCameraItem(camera, index) {
     const shortId = camera.id.substring(0, 8);
+    // macvlan: show the camera's LAN IP — that's what differentiates cameras
+    // when every port is 80. Standard mode still shows port.
+    const subtitle = camera.camera_ip
+        ? `IP: ${camera.camera_ip}`
+        : `Port: ${camera.onvif_port}`;
 
     return `
         <div class="batch-camera-item" data-camera-id="${camera.id}">
@@ -1823,7 +1845,7 @@ function createBatchCameraItem(camera, index) {
                 <div class="batch-camera-title">
                     <span class="batch-camera-number">#${index + 1}</span>
                     <span class="batch-camera-id">${shortId}</span>
-                    <span class="batch-camera-port">Port: ${camera.onvif_port}</span>
+                    <span class="batch-camera-port">${subtitle}</span>
                 </div>
                 <svg class="batch-camera-toggle" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <polyline points="6 9 12 15 18 9"></polyline>

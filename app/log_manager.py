@@ -7,6 +7,8 @@ import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+_log = logging.getLogger(__name__)
+
 
 class LogManager:
     """Manages log files with rotation and cleanup"""
@@ -57,6 +59,25 @@ class LogManager:
         return logger, handler
 
     @staticmethod
+    def close_logger(log_path):
+        """Close all file handlers attached to a logger and drop it from the registry.
+
+        Prevents FD/memory leaks when a per-camera logger is no longer needed.
+        """
+        name = str(log_path)
+        logger = logging.Logger.manager.loggerDict.get(name)
+        if logger is None or not isinstance(logger, logging.Logger):
+            return
+        for handler in list(logger.handlers):
+            try:
+                handler.close()
+            except Exception:
+                pass
+            logger.removeHandler(handler)
+        # Remove the logger entry itself so the name can be reused cleanly
+        logging.Logger.manager.loggerDict.pop(name, None)
+
+    @staticmethod
     def cleanup_old_logs(log_directory, days=None):
         """
         Delete log files older than specified days
@@ -95,14 +116,14 @@ class LogManager:
                     log_file.unlink()
                     stats["deleted"] += 1
                     stats["freed_bytes"] += file_size
-                    print(f"  🗑️  Deleted old log: {log_file.name} "
-                          f"(age: {(time.time() - file_mtime) / 86400:.1f} days)")
+                    _log.info("Deleted old log: %s (age: %.1f days)",
+                              log_file.name, (time.time() - file_mtime) / 86400)
                 else:
                     stats["kept"] += 1
 
             except Exception as e:
                 stats["errors"] += 1
-                print(f"  ⚠️  Error processing {log_file.name}: {e}")
+                _log.warning("Error processing %s: %s", log_file.name, e)
 
         return stats
 
@@ -168,39 +189,27 @@ class LogManager:
             dict: Combined statistics
         """
         logs_path = Path(logs_dir)
-
-        print("\n" + "="*60)
-        print(" LOG CLEANUP STARTED")
-        print("="*60)
+        _log.info("Log cleanup started")
 
         total_stats = {
             "ffmpeg_logs": {"deleted": 0, "kept": 0, "errors": 0, "freed_bytes": 0},
             "onvif_logs": {"deleted": 0, "kept": 0, "errors": 0, "freed_bytes": 0}
         }
 
-        # Clean FFmpeg logs
         ffmpeg_log_dir = logs_path / "ffmpeg"
         if ffmpeg_log_dir.exists():
-            print(f"\n📁 Cleaning FFmpeg logs (older than {LogManager.LOG_RETENTION_DAYS} days)...")
+            _log.info("Cleaning FFmpeg logs (older than %d days)", LogManager.LOG_RETENTION_DAYS)
             total_stats["ffmpeg_logs"] = LogManager.cleanup_old_logs(ffmpeg_log_dir)
 
-        # Clean ONVIF logs
         onvif_log_dir = logs_path / "onvif"
         if onvif_log_dir.exists():
-            print(f"\n📁 Cleaning ONVIF logs (older than {LogManager.LOG_RETENTION_DAYS} days)...")
+            _log.info("Cleaning ONVIF logs (older than %d days)", LogManager.LOG_RETENTION_DAYS)
             total_stats["onvif_logs"] = LogManager.cleanup_old_logs(onvif_log_dir)
 
-        # Summary
         total_deleted = total_stats["ffmpeg_logs"]["deleted"] + total_stats["onvif_logs"]["deleted"]
         total_kept = total_stats["ffmpeg_logs"]["kept"] + total_stats["onvif_logs"]["kept"]
         total_freed = total_stats["ffmpeg_logs"]["freed_bytes"] + total_stats["onvif_logs"]["freed_bytes"]
-
-        print("\n" + "="*60)
-        print(" CLEANUP SUMMARY")
-        print("="*60)
-        print(f"  Deleted: {total_deleted} files")
-        print(f"  Kept: {total_kept} files")
-        print(f"  Space freed: {total_freed / (1024 * 1024):.2f} MB")
-        print("="*60 + "\n")
+        _log.info("Log cleanup summary: deleted=%d kept=%d freed=%.2fMB",
+                  total_deleted, total_kept, total_freed / (1024 * 1024))
 
         return total_stats

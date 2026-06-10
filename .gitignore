@@ -26,3 +26,6 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Internal review artifacts (kept local)
+REVIEW_REPORT.html

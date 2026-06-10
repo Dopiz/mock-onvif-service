@@ -1,69 +1,73 @@
+# ── x-* anchors ────────────────────────────────────────────────────────────
+# Container stdout/stderr is captured by the Docker daemon's logging driver.
+# Without this, the host falls back to whatever dockerd default is set — on
+# many distros that is `json-file` with NO size limit, which on a prod VM
+# silently grew the mediamtx container's log to 75 GB and filled the
+# root filesystem. Pin every service to a bounded json-file rotation.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "5"
+
 services:
-  # MediaMTX RTSP Server
   mediamtx:
     image: bluenviron/mediamtx:latest
     container_name: mock-camera-mediamtx
     restart: unless-stopped
+    logging: *default-logging
     ports:
-      - "8554:8554"  # RTSP port
-      - "8322:8322"  # RTSP-UDP port (optional)
+      - "8554:8554"
+      - "8322:8322"
     volumes:
       - ./mediamtx.yml:/mediamtx.yml:ro
     networks:
       - mock-camera-network
+    # Light resource ceiling so a busy RTSP server can't starve the host.
+    mem_limit: 512m
+    cpus: "1.0"
 
-  # Mock ONVIF Camera Service
   mock-camera:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: mock-camera-service
     restart: unless-stopped
-    stop_grace_period: 10s
+    logging: *default-logging
+    # Generous grace period — cleanup_all parallel-signals all subprocesses,
+    # so 30s is plenty for 100+ cameras.
+    stop_grace_period: 30s
     depends_on:
       - mediamtx
     ports:
-      # Web UI port mapping
-      # Format: "HOST_PORT:CONTAINER_PORT"
-      # The container port (right side) should match SERVER_PORT environment variable
-      # Example: If SERVER_PORT=8889, use "8889:8889" or "8080:8889" (map host 8080 to container 8889)
       - "${SERVER_PORT:-9999}:${SERVER_PORT:-9999}"
-      - "12000-12999:12000-12999"  # ONVIF services (up to 1,000 cameras)
+      - "12000-12999:12000-12999"
     volumes:
-      # Persist camera data
       - ./data:/app/data
-      # Optional: Mount video directory for easy access
-      # - ./videos:/app/videos:ro
+      - ./logs:/app/logs
     environment:
-      # MediaMTX connection settings
       - MEDIAMTX_HOST=${MEDIAMTX_HOST:-mediamtx}
       - MEDIAMTX_PORT=${MEDIAMTX_PORT:-8554}
-      # Server configuration
       - SERVER_HOST=${SERVER_HOST:-0.0.0.0}
       - SERVER_PORT=${SERVER_PORT:-9999}
       - DEBUG_MODE=${DEBUG_MODE:-false}
-      # External IP (set this to your host machine's IP for external access)
-      # Used for RTSP/ONVIF URLs displayed in Web UI and provided to NVR platforms
-      # Usage: EXTERNAL_IP=192.168.1.100 docker compose up -d
       - EXTERNAL_IP=${EXTERNAL_IP:-}
-      # Service settings
-      - FLASK_ENV=production
+      - MAX_UPLOAD_MB=${MAX_UPLOAD_MB:-500}
+      - WATCHDOG_ENABLED=${WATCHDOG_ENABLED:-true}
+      - WATCHDOG_INTERVAL_SECONDS=${WATCHDOG_INTERVAL_SECONDS:-15}
+      - ONVIF_DISPATCHER_ENABLED=${ONVIF_DISPATCHER_ENABLED:-false}
       - PYTHONUNBUFFERED=1
     networks:
       - mock-camera-network
     healthcheck:
-      # Health check reads SERVER_PORT from container environment
-      test: ["CMD-SHELL", "curl -f http://localhost:$${SERVER_PORT:-9999}/cameras || exit 1"]
+      test: ["CMD-SHELL", "python -c \"import os,urllib.request,sys; r=urllib.request.urlopen(f'http://localhost:{os.environ.get(\\\"SERVER_PORT\\\",\\\"9999\\\")}/health',timeout=5); sys.exit(0 if r.status==200 else 1)\""]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 10s
+      start_period: 15s
+    mem_limit: 4g
+    cpus: "4.0"
 
 networks:
   mock-camera-network:
     driver: bridge
-
-volumes:
-  camera-data:
-    driver: local
-

@@ -13,6 +13,9 @@ services:
   mock-camera:
     cap_add:
       - NET_ADMIN
+    # macvlan mode needs root inside the netns to run `ip link add` and dhclient.
+    # Override the non-root default baked into the image.
+    user: "0"
     networks:
       mock-camera-network: {}      # bridge — for mediamtx communication
       mock-camera-macvlan: {}      # macvlan — exposes cameras on the LAN

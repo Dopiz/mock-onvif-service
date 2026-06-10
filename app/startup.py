@@ -1,26 +1,42 @@
-#!/usr/bin/env python3
-"""
-Startup utilities for Mock Camera Service
-Handles automatic startup of dependency services
-"""
+"""Startup helpers — background services that must run alongside the HTTP server."""
+from __future__ import annotations
 
+import logging
+
+from app.config import (
+    DATA_CLEANUP_ENABLED,
+    DATA_CLEANUP_INTERVAL_HOURS,
+    WATCHDOG_ENABLED,
+    WATCHDOG_INTERVAL_SECONDS,
+)
 from app.log_cleanup_scheduler import start_log_cleanup_scheduler
 
+logger = logging.getLogger(__name__)
 
-def startup_dependencies():
-    """Start required services"""
-    print("Starting services...")
 
-    # Start log cleanup scheduler (runs every 24 hours, keeps logs for 3 days)
-    print("Starting log cleanup scheduler...")
+def startup_dependencies() -> None:
+    logger.info("Starting background services")
+
     try:
         start_log_cleanup_scheduler(logs_dir="./logs", interval_hours=24)
-        print("✓ Log cleanup scheduler started (runs every 24 hours, keeps logs for 3 days)")
     except Exception as e:
-        print(f"⚠ Failed to start log cleanup scheduler: {e}")
+        logger.warning("Failed to start log cleanup scheduler: %s", e)
+
+    if DATA_CLEANUP_ENABLED:
+        try:
+            from app.data_cleaner import start_data_cleanup_scheduler
+            start_data_cleanup_scheduler(interval_hours=DATA_CLEANUP_INTERVAL_HOURS)
+        except Exception as e:
+            logger.warning("Failed to start data cleanup scheduler: %s", e)
+
+    if WATCHDOG_ENABLED:
+        try:
+            from app.watchdog import start_watchdog
+            start_watchdog(interval=WATCHDOG_INTERVAL_SECONDS)
+        except Exception as e:
+            logger.warning("Failed to start watchdog: %s", e)
 
 
-if __name__ == '__main__':
-    # Test startup
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     startup_dependencies()
-    print("\n✓ Startup complete")
