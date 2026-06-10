@@ -94,28 +94,73 @@ Create `.env` file from `.env.example` to customize server settings:
 cp .env.example .env
 ```
 
-Edit `.env` to configure:
+Edit `.env` to configure (`app/config.py` is the single source of truth for defaults):
 
 **Server**
-- `SERVER_HOST`: Server host (default: `0.0.0.0`)
-- `SERVER_PORT`: Server port (default: `9999`)
-- `DEBUG_MODE`: Enable debug mode (default: `false`)
-- `EXTERNAL_IP`: Host IP advertised to NVRs (Docker only; see Method 2)
+
+| Variable | Default | Description |
+|---|---|---|
+| `SERVER_HOST` | `0.0.0.0` | Flask bind host |
+| `SERVER_PORT` | `9999` | Web UI / REST port |
+| `DEBUG_MODE` | `false` | Flask debug mode |
+| `EXTERNAL_IP` | *(auto-detect)* | Host IP advertised to NVRs in RTSP/ONVIF URLs (Docker only; see Method 2) |
+
+**MediaMTX**
+
+| Variable | Default | Description |
+|---|---|---|
+| `MEDIAMTX_HOST` | `127.0.0.1` | RTSP server host FFmpeg pushes to (`mediamtx` in Docker) |
+| `MEDIAMTX_PORT` | `8554` | RTSP server port |
 
 **Upload & disk limits**
-- `MAX_UPLOAD_MB`: Largest single upload (default: `500`)
-- `MAX_VIDEO_SIZE_MB`: Largest transcoded output, hard rejected if exceeded (default: `1024`)
-- `DATA_CLEANUP_ENABLED`: Hourly orphan scanner for `data/videos` & `data/snapshots` (default: `true`)
-- `DATA_CLEANUP_INTERVAL_HOURS`: Scan interval (default: `1`)
-- `DATA_ORPHAN_GRACE_SECONDS`: Skip files newer than this (default: `300`)
+
+| Variable | Default | Description |
+|---|---|---|
+| `MAX_UPLOAD_MB` | `500` | Largest single upload (HTTP 413 if exceeded) |
+| `MAX_VIDEO_SIZE_MB` | `1024` | Largest transcoded output; transcode aborted and file deleted if exceeded |
+| `DATA_CLEANUP_ENABLED` | `true` | Orphan scanner for `data/videos` & `data/snapshots` |
+| `DATA_CLEANUP_INTERVAL_HOURS` | `1` | Orphan scan interval |
+| `DATA_ORPHAN_GRACE_SECONDS` | `300` | Skip files newer than this (could be a transcode in flight) |
+| `LOG_CLEANUP_INTERVAL_HOURS` | `24` | Disk-side sweep interval for `./logs` (deletes logs older than 3 days) |
 
 **Reliability**
-- `WATCHDOG_ENABLED`: Auto-restart dead FFmpeg / ONVIF subprocesses (default: `true`)
-- `WATCHDOG_INTERVAL_SECONDS`: Liveness check interval (default: `15`)
-- `WATCHDOG_MAX_RESTARTS`: Park a camera after N consecutive failed restarts (default: `5`)
 
-**ONVIF dispatcher (advanced, opt-in)**
-- `ONVIF_DISPATCHER_ENABLED`: Collapse N onvif_server.py subprocesses into a single in-process Flask + werkzeug-per-port server. Saves ~25 MB RSS per camera. Default: `false`.
+| Variable | Default | Description |
+|---|---|---|
+| `WATCHDOG_ENABLED` | `true` | Auto-restart dead FFmpeg / ONVIF subprocesses |
+| `WATCHDOG_INTERVAL_SECONDS` | `15` | Liveness check interval |
+| `WATCHDOG_MAX_RESTARTS` | `5` | Park a camera after N consecutive restart attempts (failed attempts count too) |
+| `WATCHDOG_RESTART_COOLDOWN_SECONDS` | `300` | Failure counter resets after the camera runs this long without another restart |
+| `PROCESS_KILL_GRACE_SECONDS` | `0.5` | Grace between SIGTERM and SIGKILL when stopping subprocesses |
+
+**Concurrency**
+
+| Variable | Default | Description |
+|---|---|---|
+| `BATCH_MAX_WORKERS` | `20` | Thread pool size for batch (multi-camera) creation |
+
+**ONVIF**
+
+| Variable | Default | Description |
+|---|---|---|
+| `ONVIF_PORT_MIN` | `12000` | Lower bound of the per-camera ONVIF port range |
+| `ONVIF_PORT_MAX` | `13000` | Upper bound of the per-camera ONVIF port range |
+| `ONVIF_USERNAME` | `test` | Credentials shown in the Web UI for the NVR (mock cameras accept anything) |
+| `ONVIF_PASSWORD` | `pass` | See above |
+| `ONVIF_DISPATCHER_ENABLED` | `false` | Collapse N `onvif_server.py` subprocesses into a single in-process Flask + werkzeug-per-port server. Saves ~25 MB RSS per camera. Opt-in |
+
+**Macvlan** (per-camera IP mode; see Method 1)
+
+| Variable | Default | Description |
+|---|---|---|
+| `MACVLAN_ENABLED` | `false` | Give each camera its own IP + MAC on the LAN |
+| `MACVLAN_DHCP` | `false` | Let the router assign camera IPs via DHCP |
+| `MACVLAN_SUBNET` | `192.168.0.0/24` | Static pool subnet (when DHCP off) |
+| `MACVLAN_GATEWAY` | `192.168.0.1` | Static pool gateway |
+| `MACVLAN_IP_START` | `192.168.0.201` | Static pool first IP |
+| `MACVLAN_IP_END` | `192.168.0.250` | Static pool last IP |
+| `MACVLAN_PARENT_IFACE` | `eth1` | NIC name *inside* the container. Not auto-detected when omitted — auto-detection only runs as a fallback if the configured/default name doesn't exist |
+| `MACVLAN_PARENT` | `eth0` | *Compose-only* — host NIC used as parent of the Docker macvlan network (`docker-compose.macvlan.yml`); not read by the app |
 
 **Note**: For Docker deployment, you can also set these via environment variables in `docker-compose.yml` or pass them when running `docker compose up`.
 
@@ -171,7 +216,7 @@ MACVLAN_DHCP=true
 # MACVLAN_IP_END=192.168.0.250
 ```
 
-> **Note:** `MACVLAN_PARENT_IFACE` (the interface name *inside* the container) is auto-detected. Only set it manually if auto-detection fails.
+> **Note:** `MACVLAN_PARENT` is the *host* NIC and is only used by `docker-compose.macvlan.yml` to build the Docker macvlan network. `MACVLAN_PARENT_IFACE` is the NIC name *inside* the container and defaults to `eth1` (which is what Docker names the macvlan-attached interface). It is not auto-detected when omitted — auto-detection only runs as a fallback if the configured/default interface doesn't exist in the container.
 
 #### Step 3: Start with macvlan overlay
 
@@ -275,9 +320,9 @@ cp .env.example .env
     - **Quality Settings**:
       - Choose resolution: `480p`, `720p`, `1080p`, `4K`, `5K`
       - Or use `Custom` to set resolution, FPS, and bitrate manually
-    - **Enable Sub Profile**: Optional secondary 480p stream for single cameras
+    - **Enable Sub Profile**: Optional secondary 360p stream for single cameras
       - Main profile uses your selected quality
-      - Sub profile fixed at `480p` (accessible via ONVIF Profile_2)
+      - Sub profile fixed at `360p` / 24 fps / 750 kbps (accessible via ONVIF `Profile_2`, advertised as `SubProfile_360p`)
 3. System will automatically:
     - Start FFmpeg process to push video to RTSP
     - Start independent ONVIF server instance
@@ -380,10 +425,35 @@ curl -u test:pass -X POST http://localhost:12000/onvif/device_service \
 </soap:Envelope>'
 ```
 
-### 4. List All Mock Cameras
+### List All Mock Cameras
 ```bash
 curl -s http://localhost:9999/cameras | jq
 ```
+
+---
+
+## 🌐 REST API
+
+All endpoints are served on `SERVER_PORT` (default `9999`).
+
+| Method | Path | Request | Response (success) |
+|---|---|---|---|
+| `GET` | `/` | — | Web UI (`index.html`) |
+| `POST` | `/upload` | `multipart/form-data` — `file` (required); optional: `camera_count`, `sub_profile`, `camera_name`, `width`, `height`, `fps`, `video_bitrate`, `audio_bitrate`, `trim_start`, `trim_end`, `speed`, `extend_last_frame` | `201` `{"cameras": [<camera>, ...], "count": n}` — always this shape, even for a single camera |
+| `GET` | `/cameras` | — | `200` `{"cameras": [<camera>, ...]}` |
+| `GET` | `/cameras/<id>` | — | `200` `<camera>` |
+| `DELETE` | `/cameras/<id>` | — | `200` `{"status": "deleted", "id": "<id>"}` |
+| `GET` | `/snapshots/<filename>` | — | `200` JPEG thumbnail (e.g. `/snapshots/<camera-id>.jpg`) |
+| `GET` | `/config` | — | `200` `{"param_ranges", "valid_audio_bitrates", "edit_limits", "extend_frame_duration"}` — validation ranges the Web UI uses |
+| `GET` | `/health` | — | `200` `{"status": "ok", "cameras": n}` |
+
+**Camera object** (`<camera>`): `id`, `video_path`, `rtsp_port`, `onvif_port`, `ffmpeg_pid`, `onvif_pid` (`null` in dispatcher mode — no subprocess), `rtsp_url`, `onvif_url`, `snapshot_url`, `username`, `password`, `width`, `height`, `fps`, `video_bitrate_mbps`, `sub_profile`, `manufacturer`, `created_at`; plus `shared_video_id` (batch-created cameras), `camera_ip` (macvlan mode), `ffmpeg_pid_sub` / `rtsp_url_sub` (when sub profile enabled).
+
+**Error envelope**: every error returns JSON `{"error": "<message>", "type": "<ExceptionName>"}` with the matching HTTP status — including `404` (`NotFound`, also for unknown camera IDs as `CameraNotFoundError`), `405` (`MethodNotAllowed`) and `500` (`InternalError`). Two variations: request-schema violations return `400` `{"error": "validation failed", "details": [...]}`, and oversized uploads return `413` `{"error": "upload exceeds limit (... MB)"}`.
+
+**Notes**
+- `camera_name` feeds the ONVIF `Manufacturer` field; it is whitelist-validated (letters, digits, spaces, `_`, `-`, `.`; 1–50 chars).
+- There is no `/data/...` route — videos and the SQLite database are not downloadable; only `/snapshots/<filename>` is exposed.
 
 ---
 
@@ -471,6 +541,20 @@ ffmpeg -ss 00:00:02 -i video.mp4 \
 
 ---
 
+## 🧪 Development & Testing
+
+```bash
+# Run the pytest suite (142 tests)
+uv run pytest
+
+# Lint (ruff: E/F/I/W, line length 100)
+uv run ruff check .
+```
+
+Dev dependencies (`pytest`, `ruff`) are declared in `pyproject.toml`'s dev group — `uv sync` installs them. `requirements.txt` is kept in sync for the Docker build.
+
+---
+
 ## 📂 Directory Structure
 
 ```
@@ -483,13 +567,15 @@ mock-onvif-service/
 │   ├── schemas.py                # Pydantic upload schemas
 │   ├── db.py                     # SQLite repository + YAML migration
 │   ├── camera_lifecycle.py       # Create / delete / restore (ExitStack-based)
-│   ├── camera_manager.py         # Backward-compat shim → camera_lifecycle
+│   ├── runtime_registry.py       # In-memory PID/state registry (RuntimeState)
 │   ├── transcoder.py             # FFmpeg transcode + snapshot + size cap
 │   ├── ffmpeg_builder.py         # Single source of truth for FFmpeg cmds
 │   ├── port_allocator.py         # Thread-safe ONVIF port allocator
 │   ├── process_supervisor.py     # Subprocess spawn/log-pipe/terminate/reap
 │   ├── macvlan_manager.py        # macvlan interface lifecycle + IP pool
 │   ├── onvif_handlers.py         # Pure SOAP response builders
+│   ├── onvif_endpoint.py         # ONVIF strategy: subprocess vs dispatcher
+│   ├── onvif_http.py             # Shared SOAP route shell for both modes
 │   ├── onvif_dispatcher.py       # Single in-process ONVIF (opt-in)
 │   ├── watchdog.py               # Auto-restart dead FFmpeg/ONVIF
 │   ├── log_manager.py            # Rotating file handler + FD cleanup
@@ -500,6 +586,11 @@ mock-onvif-service/
 ├── scripts/
 │   └── setup-macvlan-host.sh     # Host ARP isolation (run once, Linux only)
 ├── static/                       # Frontend (Web UI)
+│   ├── index.html                # Single page
+│   ├── app.js                    # Thin entry point (ES modules, no build step)
+│   └── js/                       # api / state / utils / filters / cards /
+│                                 #   upload-modal / video-editor modules
+├── tests/                        # pytest suite (run: uv run pytest)
 ├── data/                         # Runtime data (created on first run)
 │   ├── service.db                # SQLite — durable camera metadata (single source of truth)
 │   ├── videos/                   # Transcoded mp4 files
@@ -512,6 +603,7 @@ mock-onvif-service/
 ├── Dockerfile                    # Multi-stage build, non-root runtime
 ├── mediamtx.yml                  # mediamtx config
 ├── onvif_server.py               # Per-camera ONVIF subprocess (default mode)
+├── pyproject.toml                # uv project metadata + pytest/ruff config
 ├── run.py                        # Entry point
 ├── setup.sh                      # First-time local setup
 ├── start.sh                      # Quick start (local)
