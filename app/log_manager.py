@@ -167,7 +167,8 @@ class LogManager:
 
         total_deleted = total_stats["ffmpeg_logs"]["deleted"] + total_stats["onvif_logs"]["deleted"]
         total_kept = total_stats["ffmpeg_logs"]["kept"] + total_stats["onvif_logs"]["kept"]
-        total_freed = total_stats["ffmpeg_logs"]["freed_bytes"] + total_stats["onvif_logs"]["freed_bytes"]
+        total_freed = (total_stats["ffmpeg_logs"]["freed_bytes"]
+                       + total_stats["onvif_logs"]["freed_bytes"])
         _log.info("Log cleanup summary: deleted=%d kept=%d freed=%.2fMB",
                   total_deleted, total_kept, total_freed / (1024 * 1024))
 

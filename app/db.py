@@ -212,7 +212,8 @@ def migrate_yaml_configs(repo: CameraRepository, configs_dir: Path = CAMERAS_DIR
                 continue
 
             shared = cfg.get("shared_video_id")
-            video_file = (VIDEOS_DIR / f"{shared}_shared.mp4") if shared else (VIDEOS_DIR / f"{camera_id}.mp4")
+            video_file = (VIDEOS_DIR / f"{shared}_shared.mp4") if shared \
+                else (VIDEOS_DIR / f"{camera_id}.mp4")
 
             rec = CameraRecord(
                 camera_id=camera_id,

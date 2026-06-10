@@ -63,9 +63,9 @@ def main() -> None:
     from app.config import DEBUG_MODE, SERVER_HOST, SERVER_PORT, ensure_dirs
     ensure_dirs()
 
-    from app.startup import start_background_services
-    from app.camera_lifecycle import restore_cameras
     from app.app import app
+    from app.camera_lifecycle import restore_cameras
+    from app.startup import start_background_services
 
     start_background_services()
     restore_cameras()

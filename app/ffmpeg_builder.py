@@ -141,7 +141,8 @@ def build_snapshot_cmd(*, input_path: Path, output_path: Path) -> list[str]:
         "ffmpeg",
         "-ss", "00:00:02",
         "-i", str(input_path),
-        "-vf", "thumbnail=100,scale='min(iw,1280)':'min(ih,720)':force_original_aspect_ratio=decrease",
+        "-vf", ("thumbnail=100,"
+                "scale='min(iw,1280)':'min(ih,720)':force_original_aspect_ratio=decrease"),
         "-frames:v", "1",
         "-q:v", "2",
         "-y", str(output_path),

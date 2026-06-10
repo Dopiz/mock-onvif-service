@@ -18,7 +18,8 @@ logger = logging.getLogger(__name__)
 class LogCleanupScheduler:
     """Scheduler for periodic log cleanup."""
 
-    def __init__(self, logs_dir=LOGS_DIR, interval_hours: float = LOG_CLEANUP_INTERVAL_HOURS) -> None:
+    def __init__(self, logs_dir=LOGS_DIR,
+                 interval_hours: float = LOG_CLEANUP_INTERVAL_HOURS) -> None:
         self.logs_dir = logs_dir
         self.interval_seconds: float = interval_hours * 3600
         self._stop_event = threading.Event()

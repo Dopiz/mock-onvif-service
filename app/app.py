@@ -45,7 +45,9 @@ def _handle_service_error(e: CameraServiceError):
 
 @app.errorhandler(PydanticValidationError)
 def _handle_pydantic_error(e: PydanticValidationError):
-    return jsonify({"error": "validation failed", "details": e.errors()}), 400
+    # include_context strips raw ValueError objects that jsonify cannot serialise
+    details = e.errors(include_url=False, include_context=False, include_input=False)
+    return jsonify({"error": "validation failed", "details": details}), 400
 
 
 @app.errorhandler(404)

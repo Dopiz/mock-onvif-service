@@ -19,9 +19,12 @@ _MANUFACTURER_PATTERN = re.compile(r"[\w\s\-.]{1,50}")
 
 
 class VideoParams(BaseModel):
-    width: int = Field(default=1920, ge=CUSTOM_PARAM_RANGES["width"]["min"], le=CUSTOM_PARAM_RANGES["width"]["max"])
-    height: int = Field(default=1080, ge=CUSTOM_PARAM_RANGES["height"]["min"], le=CUSTOM_PARAM_RANGES["height"]["max"])
-    fps: float = Field(default=30.0, ge=CUSTOM_PARAM_RANGES["fps"]["min"], le=CUSTOM_PARAM_RANGES["fps"]["max"])
+    width: int = Field(default=1920, ge=CUSTOM_PARAM_RANGES["width"]["min"],
+                       le=CUSTOM_PARAM_RANGES["width"]["max"])
+    height: int = Field(default=1080, ge=CUSTOM_PARAM_RANGES["height"]["min"],
+                        le=CUSTOM_PARAM_RANGES["height"]["max"])
+    fps: float = Field(default=30.0, ge=CUSTOM_PARAM_RANGES["fps"]["min"],
+                       le=CUSTOM_PARAM_RANGES["fps"]["max"])
     video_bitrate: str = "4M"
     audio_bitrate: str = "128k"
 
@@ -75,11 +78,14 @@ class EditParams(BaseModel):
         if self.trim_end is None:
             return self
         raw_duration = self.trim_end - self.trim_start
-        output = raw_duration / self.speed + (EXTEND_FRAME_DURATION if self.extend_last_frame else 0)
+        extend = EXTEND_FRAME_DURATION if self.extend_last_frame else 0
+        output = raw_duration / self.speed + extend
         if output < EDIT_LIMITS["min_duration"]:
-            raise ValueError(f"Output duration must be at least {EDIT_LIMITS['min_duration']} seconds")
+            raise ValueError(
+                f"Output duration must be at least {EDIT_LIMITS['min_duration']} seconds")
         if output > EDIT_LIMITS["max_duration"]:
-            raise ValueError(f"Output duration cannot exceed {EDIT_LIMITS['max_duration']} seconds")
+            raise ValueError(
+                f"Output duration cannot exceed {EDIT_LIMITS['max_duration']} seconds")
         return self
 
     def has_edits(self) -> bool:
