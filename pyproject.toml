@@ -1,0 +1,27 @@
+[project]
+name = "mock-onvif-service"
+version = "0.1.0"
+description = "Turn local video files into ONVIF-compliant mock cameras (RTSP via mediamtx + ONVIF SOAP endpoints)"
+requires-python = ">=3.13"
+# Keep in sync with requirements.txt (Docker installs from requirements.txt).
+dependencies = [
+    "flask==3.1.2",
+    "flask-cors==6.0.2",
+    "pydantic==2.11.7",
+    "python-dotenv==1.2.1",
+    "pyyaml==6.0.3",
+    "waitress==3.0.2",
+]
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

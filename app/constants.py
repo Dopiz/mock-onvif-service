@@ -21,3 +21,11 @@ EDIT_LIMITS = {
     'max_speed': 4.0         # Maximum playback speed (fast)
 }
 EXTEND_FRAME_DURATION = 10   # Duration to extend last frame in seconds
+
+# Sub-profile (secondary stream) parameters. Single source of truth shared by
+# the encoder (transcoder/ffmpeg_builder) and the ONVIF SOAP responses
+# (onvif_handlers) — these MUST match the actual encoder output.
+SUB_PROFILE_WIDTH = 640      # 16:9 reference width; actual width follows source aspect
+SUB_PROFILE_HEIGHT = 360
+SUB_PROFILE_FPS = 24
+SUB_PROFILE_BITRATE_KBPS = 750

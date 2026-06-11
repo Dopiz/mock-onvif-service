@@ -1,9 +1,10 @@
 """Pydantic schemas for HTTP request validation."""
 from __future__ import annotations
 
+import re
 from typing import Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.constants import (
     CUSTOM_PARAM_RANGES,
@@ -12,11 +13,18 @@ from app.constants import (
     VALID_AUDIO_BITRATES,
 )
 
+# Whitelist for user-supplied camera names. The value is interpolated into
+# ONVIF SOAP XML and rendered in the Web UI, so keep it to safe characters.
+_MANUFACTURER_PATTERN = re.compile(r"[\w\s\-.]{1,50}")
+
 
 class VideoParams(BaseModel):
-    width: int = Field(default=1920, ge=CUSTOM_PARAM_RANGES["width"]["min"], le=CUSTOM_PARAM_RANGES["width"]["max"])
-    height: int = Field(default=1080, ge=CUSTOM_PARAM_RANGES["height"]["min"], le=CUSTOM_PARAM_RANGES["height"]["max"])
-    fps: float = Field(default=30.0, ge=CUSTOM_PARAM_RANGES["fps"]["min"], le=CUSTOM_PARAM_RANGES["fps"]["max"])
+    width: int = Field(default=1920, ge=CUSTOM_PARAM_RANGES["width"]["min"],
+                       le=CUSTOM_PARAM_RANGES["width"]["max"])
+    height: int = Field(default=1080, ge=CUSTOM_PARAM_RANGES["height"]["min"],
+                        le=CUSTOM_PARAM_RANGES["height"]["max"])
+    fps: float = Field(default=30.0, ge=CUSTOM_PARAM_RANGES["fps"]["min"],
+                       le=CUSTOM_PARAM_RANGES["fps"]["max"])
     video_bitrate: str = "4M"
     audio_bitrate: str = "128k"
 
@@ -64,25 +72,42 @@ class EditParams(BaseModel):
             raise ValueError("End time must be greater than start time")
         return v
 
+    @model_validator(mode="after")
+    def _validate_duration(self) -> "EditParams":
+        """Check the resulting output duration is within allowed limits."""
+        if self.trim_end is None:
+            return self
+        raw_duration = self.trim_end - self.trim_start
+        extend = EXTEND_FRAME_DURATION if self.extend_last_frame else 0
+        output = raw_duration / self.speed + extend
+        if output < EDIT_LIMITS["min_duration"]:
+            raise ValueError(
+                f"Output duration must be at least {EDIT_LIMITS['min_duration']} seconds")
+        if output > EDIT_LIMITS["max_duration"]:
+            raise ValueError(
+                f"Output duration cannot exceed {EDIT_LIMITS['max_duration']} seconds")
+        return self
+
     def has_edits(self) -> bool:
         return (self.trim_start > 0 or self.trim_end is not None or
                 self.speed != 1.0 or self.extend_last_frame)
-
-    def validate_duration(self) -> None:
-        """Check the resulting output duration is within allowed limits."""
-        if self.trim_end is None:
-            return
-        raw_duration = self.trim_end - self.trim_start
-        output = raw_duration / self.speed + (EXTEND_FRAME_DURATION if self.extend_last_frame else 0)
-        if output < EDIT_LIMITS["min_duration"]:
-            raise ValueError(f"Output duration must be at least {EDIT_LIMITS['min_duration']} seconds")
-        if output > EDIT_LIMITS["max_duration"]:
-            raise ValueError(f"Output duration cannot exceed {EDIT_LIMITS['max_duration']} seconds")
 
 
 class UploadRequest(BaseModel):
     camera_count: int = Field(default=1, ge=1, le=100)
     sub_profile: bool = False
-    camera_name: str = "MockONVIF"
+    # Canonical name is "manufacturer"; the web form posts it as "camera_name"
+    # and app.py maps it at the HTTP boundary.
+    manufacturer: str = "MockONVIF"
     video_params: VideoParams
     edit_params: Optional[EditParams] = None
+
+    @field_validator("manufacturer")
+    @classmethod
+    def _validate_manufacturer(cls, v: str) -> str:
+        if not _MANUFACTURER_PATTERN.fullmatch(v):
+            raise ValueError(
+                "Camera name may only contain letters, digits, spaces, "
+                "underscores, hyphens and dots (1-50 characters)"
+            )
+        return v

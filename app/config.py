@@ -9,6 +9,10 @@ SERVER_HOST = os.getenv("SERVER_HOST", "0.0.0.0")
 SERVER_PORT = int(os.getenv("SERVER_PORT", "9999"))
 DEBUG_MODE = os.getenv("DEBUG_MODE", "false").lower() in ("true", "1", "yes")
 
+# IP advertised to NVRs/Web UI in RTSP/ONVIF URLs. When unset, the server IP
+# is auto-detected (see app.utils.get_server_ip).
+EXTERNAL_IP = os.getenv("EXTERNAL_IP")
+
 # Cap upload size (bytes). Default 500 MB.
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "500"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
@@ -36,6 +40,16 @@ ONVIF_PORT_MAX = int(os.getenv("ONVIF_PORT_MAX", "13000"))
 # Single-dispatcher mode collapses N onvif_server subprocesses into one in-process
 # Flask app that routes by request.host. Opt-in; defaults off for backward compat.
 ONVIF_DISPATCHER_ENABLED = os.getenv("ONVIF_DISPATCHER_ENABLED", "false").lower() == "true"
+
+# Credentials advertised to NVRs (mock cameras accept anything; these are what
+# the Web UI displays for copy-paste into the NVR).
+ONVIF_USERNAME = os.getenv("ONVIF_USERNAME", "test")
+ONVIF_PASSWORD = os.getenv("ONVIF_PASSWORD", "pass")
+
+# TCP connect probe timeout used when scanning for a free ONVIF port.
+# Do not raise — allocating across the full 12000-13000 range under load is
+# otherwise unbearable (see CLAUDE.md pitfalls).
+PORT_PROBE_TIMEOUT_SECONDS = 0.1
 
 # ── Macvlan ────────────────────────────────────────────────────────────────
 MACVLAN_ENABLED = os.getenv("MACVLAN_ENABLED", "false").lower() == "true"
@@ -65,6 +79,12 @@ PROCESS_KILL_GRACE_SECONDS = float(os.getenv("PROCESS_KILL_GRACE_SECONDS", "0.5"
 WATCHDOG_ENABLED = os.getenv("WATCHDOG_ENABLED", "true").lower() in ("true", "1", "yes")
 WATCHDOG_INTERVAL_SECONDS = int(os.getenv("WATCHDOG_INTERVAL_SECONDS", "15"))
 WATCHDOG_MAX_RESTARTS = int(os.getenv("WATCHDOG_MAX_RESTARTS", "5"))
+# A camera's consecutive-failure counter resets once it has run for this long
+# without needing another restart.
+WATCHDOG_RESTART_COOLDOWN_SECONDS = int(os.getenv("WATCHDOG_RESTART_COOLDOWN_SECONDS", "300"))
+
+# ── Log cleanup ────────────────────────────────────────────────────────────
+LOG_CLEANUP_INTERVAL_HOURS = float(os.getenv("LOG_CLEANUP_INTERVAL_HOURS", "24"))
 
 
 def ensure_dirs() -> None:

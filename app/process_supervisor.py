@@ -93,7 +93,7 @@ def start_onvif_subprocess(
     audio_bitrate_kbps: int,
     shared_video_id: Optional[str] = None,
     sub_profile: bool = False,
-    camera_name: str = "MockONVIF",
+    manufacturer: str = "MockONVIF",
     camera_ip: Optional[str] = None,
 ) -> int:
     """Spawn a per-camera onvif_server.py process. Returns PID."""
@@ -117,7 +117,7 @@ def start_onvif_subprocess(
         "ONVIF_VIDEO_BITRATE_KBPS": str(video_bitrate_kbps),
         "ONVIF_AUDIO_BITRATE_KBPS": str(audio_bitrate_kbps),
         "ONVIF_SUB_PROFILE": "true" if sub_profile else "false",
-        "ONVIF_MANUFACTURER": camera_name,
+        "ONVIF_MANUFACTURER": manufacturer,
     })
     if shared_video_id:
         env["ONVIF_SHARED_VIDEO_ID"] = shared_video_id
@@ -183,6 +183,48 @@ def _terminate_and_reap(pid: int, *, kill_group: bool = False) -> None:
             os.waitpid(pid, os.WNOHANG)
     except (ChildProcessError, OSError):
         pass
+
+
+def terminate_many(pids: list[int], *, kill_group: bool = False,
+                   grace: Optional[float] = None) -> None:
+    """Terminate a batch of processes with a single shared grace period.
+
+    Parallel SIGTERM → one grace sleep → parallel SIGKILL for survivors →
+    batch ``waitpid`` reap. Used at shutdown where the per-PID serial sleep of
+    :func:`_terminate_and_reap` would dominate total teardown time.
+    """
+    pids = [p for p in pids if p]
+    if not pids:
+        return
+    if grace is None:
+        grace = PROCESS_KILL_GRACE_SECONDS
+
+    def _signal(pid: int, sig: int) -> None:
+        try:
+            if kill_group:
+                os.killpg(os.getpgid(pid), sig)
+            else:
+                os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+    for pid in pids:
+        _signal(pid, signal.SIGTERM)
+
+    time.sleep(grace)
+
+    for pid in pids:
+        try:
+            os.kill(pid, 0)  # still alive?
+        except (ProcessLookupError, PermissionError, OSError):
+            continue
+        _signal(pid, signal.SIGKILL)
+
+    for pid in pids:
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except (ChildProcessError, OSError):
+            pass
 
 
 def stop_ffmpeg(pid: int) -> None:

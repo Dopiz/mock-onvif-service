@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.config import MAX_VIDEO_SIZE_BYTES, MAX_VIDEO_SIZE_MB, SNAPSHOTS_DIR
+from app.constants import SUB_PROFILE_HEIGHT
 from app.exceptions import SnapshotError, TranscodeError
 from app.ffmpeg_builder import (
     build_atempo_chain,
@@ -128,7 +129,7 @@ def transcode(
 
     # Build a 360p sub-stream from the freshly-transcoded main file
     aspect_ratio = params.width / params.height
-    sub_height = 360
+    sub_height = SUB_PROFILE_HEIGHT
     sub_width = int(round(sub_height * aspect_ratio / 2) * 2)
     sub_path = Path(str(output_path).replace(".mp4", "_sub.mp4"))
     _run_ffmpeg(
@@ -138,8 +139,8 @@ def transcode(
         ),
         "sub_profile",
     )
-    # Sub-stream is fixed 0.75M bitrate × 180s ≈ 17 MB so it can't realistically
-    # blow the cap, but check defensively in case future params change.
+    # Sub-stream is fixed at SUB_PROFILE_BITRATE_KBPS (750 kbps) × 180s ≈ 17 MB so
+    # it can't realistically blow the cap, but check defensively anyway.
     _enforce_size_limit(sub_path)
     return output_path, sub_path
 

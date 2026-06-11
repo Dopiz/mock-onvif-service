@@ -2,12 +2,17 @@
 Log management utilities for FFmpeg and ONVIF logs
 Handles log rotation and cleanup
 """
+from __future__ import annotations
+
 import logging
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from typing import Optional, Union
 
 _log = logging.getLogger(__name__)
+
+PathLike = Union[str, Path]
 
 
 class LogManager:
@@ -19,14 +24,18 @@ class LogManager:
     LOG_RETENTION_DAYS = 3  # Delete logs older than 3 days
 
     @staticmethod
-    def create_rotating_logger(log_path, max_bytes=None, backup_count=None):
+    def create_rotating_logger(
+        log_path: PathLike,
+        max_bytes: Optional[int] = None,
+        backup_count: Optional[int] = None,
+    ) -> tuple[logging.Logger, RotatingFileHandler]:
         """
         Create a logger with rotating file handler
 
         Args:
             log_path: Path to log file
-            max_bytes: Maximum size in bytes before rotation (default: 10MB)
-            backup_count: Number of backup files to keep (default: 3)
+            max_bytes: Maximum size in bytes before rotation (default: MAX_LOG_SIZE, 3 MB)
+            backup_count: Number of backup files to keep (default: BACKUP_COUNT, 3)
 
         Returns:
             tuple: (logger, file_handler)
@@ -59,7 +68,7 @@ class LogManager:
         return logger, handler
 
     @staticmethod
-    def close_logger(log_path):
+    def close_logger(log_path: PathLike) -> None:
         """Close all file handlers attached to a logger and drop it from the registry.
 
         Prevents FD/memory leaks when a per-camera logger is no longer needed.
@@ -78,13 +87,13 @@ class LogManager:
         logging.Logger.manager.loggerDict.pop(name, None)
 
     @staticmethod
-    def cleanup_old_logs(log_directory, days=None):
+    def cleanup_old_logs(log_directory: PathLike, days: Optional[int] = None) -> dict:
         """
         Delete log files older than specified days
 
         Args:
             log_directory: Directory containing log files
-            days: Number of days to retain (default: 3)
+            days: Number of days to retain (default: LOG_RETENTION_DAYS, 3)
 
         Returns:
             dict: Statistics about cleaned files
@@ -101,7 +110,7 @@ class LogManager:
 
         # Find all log files (including rotated ones)
         log_patterns = ['*.log', '*.log.*']
-        log_files = []
+        log_files: list[Path] = []
         for pattern in log_patterns:
             log_files.extend(log_dir.glob(pattern))
 
@@ -128,57 +137,7 @@ class LogManager:
         return stats
 
     @staticmethod
-    def get_log_directory_stats(log_directory):
-        """
-        Get statistics about log directory
-
-        Args:
-            log_directory: Directory containing log files
-
-        Returns:
-            dict: Statistics about the directory
-        """
-        log_dir = Path(log_directory)
-        if not log_dir.exists():
-            return {
-                "total_files": 0,
-                "total_size_bytes": 0,
-                "total_size_mb": 0,
-                "oldest_file": None,
-                "newest_file": None
-            }
-
-        log_files = list(log_dir.glob('*.log*'))
-
-        if not log_files:
-            return {
-                "total_files": 0,
-                "total_size_bytes": 0,
-                "total_size_mb": 0,
-                "oldest_file": None,
-                "newest_file": None
-            }
-
-        total_size = sum(f.stat().st_size for f in log_files)
-        oldest = min(log_files, key=lambda f: f.stat().st_mtime)
-        newest = max(log_files, key=lambda f: f.stat().st_mtime)
-
-        return {
-            "total_files": len(log_files),
-            "total_size_bytes": total_size,
-            "total_size_mb": round(total_size / (1024 * 1024), 2),
-            "oldest_file": {
-                "name": oldest.name,
-                "age_days": round((time.time() - oldest.stat().st_mtime) / 86400, 1)
-            },
-            "newest_file": {
-                "name": newest.name,
-                "age_days": round((time.time() - newest.stat().st_mtime) / 86400, 1)
-            }
-        }
-
-    @staticmethod
-    def cleanup_all_log_directories(logs_dir):
+    def cleanup_all_log_directories(logs_dir: PathLike) -> dict:
         """
         Clean up all log directories (ffmpeg and onvif)
 
@@ -208,7 +167,8 @@ class LogManager:
 
         total_deleted = total_stats["ffmpeg_logs"]["deleted"] + total_stats["onvif_logs"]["deleted"]
         total_kept = total_stats["ffmpeg_logs"]["kept"] + total_stats["onvif_logs"]["kept"]
-        total_freed = total_stats["ffmpeg_logs"]["freed_bytes"] + total_stats["onvif_logs"]["freed_bytes"]
+        total_freed = (total_stats["ffmpeg_logs"]["freed_bytes"]
+                       + total_stats["onvif_logs"]["freed_bytes"])
         _log.info("Log cleanup summary: deleted=%d kept=%d freed=%.2fMB",
                   total_deleted, total_kept, total_freed / (1024 * 1024))
 

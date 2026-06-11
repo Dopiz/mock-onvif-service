@@ -13,11 +13,11 @@ import logging
 import threading
 from typing import Optional
 
-from flask import Flask, Response, request, send_file
+from flask import Flask
 from werkzeug.serving import make_server
 
-from app.config import SNAPSHOTS_DIR
-from app.onvif_handlers import OnvifContext, dispatch_device, dispatch_media
+from app.onvif_handlers import OnvifContext
+from app.onvif_http import extract_host_port, register_onvif_routes
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +39,12 @@ class _PortServer:
     def stop(self) -> None:
         try:
             self._server.shutdown()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("Port server shutdown raised: %s", e)
         try:
             self._server.server_close()
-        except Exception:
-            pass
+        except OSError as e:
+            logger.debug("Port server close raised: %s", e)
         if self._thread.is_alive():
             self._thread.join(timeout=3)
 
@@ -62,78 +62,17 @@ class OnvifDispatcher:
         self._ip_to_ctx: dict[str, OnvifContext] = {}
         self._lock = threading.Lock()
         self._servers: dict[tuple[str, int], _PortServer] = {}
-        self._register_routes()
+        register_onvif_routes(self.app, self._lookup_ctx)
 
     # ── Context lookup ────────────────────────────────────────────────────
     def _lookup_ctx(self) -> Optional[OnvifContext]:
-        host = request.host
-        if ":" in host:
-            ip, port_s = host.rsplit(":", 1)
-            try:
-                port = int(port_s)
-            except ValueError:
-                port = 80
-        else:
-            ip, port = host, 80
+        ip, port = extract_host_port()
         with self._lock:
             # Macvlan: lookup by IP. Standard: lookup by port.
             ctx = self._ip_to_ctx.get(ip)
             if ctx is None:
                 ctx = self._port_to_ctx.get(port)
         return ctx
-
-    # ── Routes ────────────────────────────────────────────────────────────
-    def _register_routes(self) -> None:
-        @self.app.route("/onvif/device_service", methods=["POST"])
-        def device_service():
-            ctx = self._lookup_ctx()
-            if ctx is None:
-                return Response("Unknown camera", status=404)
-            xml_data = request.data.decode("utf-8", errors="ignore")
-            ip, port = self._extract_host_port()
-            resp = dispatch_device(ctx, xml_data, ip, port)
-            logger.info("[%s] device: %s", ctx.camera_id[:8], request.remote_addr)
-            return Response(resp, mimetype="application/soap+xml")
-
-        @self.app.route("/onvif/media_service", methods=["POST"])
-        def media_service():
-            ctx = self._lookup_ctx()
-            if ctx is None:
-                return Response("Unknown camera", status=404)
-            xml_data = request.data.decode("utf-8", errors="ignore")
-            ip, port = self._extract_host_port()
-            resp = dispatch_media(ctx, xml_data, ip, port)
-            logger.info("[%s] media: %s", ctx.camera_id[:8], request.remote_addr)
-            return Response(resp, mimetype="application/soap+xml")
-
-        @self.app.route("/snapshot.jpg", methods=["GET"])
-        def snapshot():
-            ctx = self._lookup_ctx()
-            if ctx is None:
-                return Response("Unknown camera", status=404)
-            snap_id = ctx.shared_video_id or ctx.camera_id
-            path = SNAPSHOTS_DIR / f"{snap_id}.jpg"
-            if path.exists():
-                return send_file(str(path), mimetype="image/jpeg")
-            return Response("Snapshot not available", status=404)
-
-        @self.app.route(
-            "/onvif/device_service.wsdl", methods=["GET"]
-        )
-        @self.app.route("/onvif/media_service.wsdl", methods=["GET"])
-        def wsdl():
-            return Response('<?xml version="1.0"?><definitions/>', mimetype="text/xml")
-
-    @staticmethod
-    def _extract_host_port() -> tuple[str, int]:
-        host = request.host
-        if ":" in host:
-            ip, port_s = host.rsplit(":", 1)
-            try:
-                return ip, int(port_s)
-            except ValueError:
-                return ip, 80
-        return host, 80
 
     # ── Camera registration ───────────────────────────────────────────────
     def add_camera(self, ctx: OnvifContext, bind_ip: Optional[str] = None,

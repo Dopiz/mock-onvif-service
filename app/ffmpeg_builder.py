@@ -5,7 +5,11 @@ from pathlib import Path
 from typing import Optional
 
 from app.config import MEDIAMTX_HOST, MEDIAMTX_RTSP_PORT
-from app.constants import EXTEND_FRAME_DURATION
+from app.constants import (
+    EXTEND_FRAME_DURATION,
+    SUB_PROFILE_BITRATE_KBPS,
+    SUB_PROFILE_FPS,
+)
 
 
 # ── Audio speed filter chain ───────────────────────────────────────────────
@@ -106,11 +110,13 @@ def build_transcode_cmd(*, input_path: Path, output_path: Path,
 def build_sub_profile_cmd(*, input_path: Path, output_path: Path,
                           width: int, height: int) -> list[str]:
     """Downscale an already-transcoded main stream into a 360p sub stream."""
+    bitrate = f"{SUB_PROFILE_BITRATE_KBPS}k"
     return [
         "ffmpeg",
         "-i", str(input_path),
         "-vf", f"scale={width}x{height}",
-        *_h264_encoder_args("0.75M", "1M", "1.5M", gop=24, fps=24.0),
+        *_h264_encoder_args(bitrate, "1M", "1.5M",
+                            gop=SUB_PROFILE_FPS, fps=float(SUB_PROFILE_FPS)),
         *_aac_encoder_args("64k"),
         "-y", str(output_path),
     ]
@@ -135,14 +141,17 @@ def build_snapshot_cmd(*, input_path: Path, output_path: Path) -> list[str]:
         "ffmpeg",
         "-ss", "00:00:02",
         "-i", str(input_path),
-        "-vf", "thumbnail=100,scale='min(iw,1280)':'min(ih,720)':force_original_aspect_ratio=decrease",
+        "-vf", ("thumbnail=100,"
+                "scale='min(iw,1280)':'min(ih,720)':force_original_aspect_ratio=decrease"),
         "-frames:v", "1",
         "-q:v", "2",
         "-y", str(output_path),
     ]
 
 
-def build_streaming_cmd(video_path: Path, camera_id: str) -> list[str]:
+def build_streaming_cmd(video_path: Path, camera_id: str, *,
+                        host: str = MEDIAMTX_HOST,
+                        port: int = MEDIAMTX_RTSP_PORT) -> list[str]:
     """RTSP-out loop command using stream-copy mode (no re-encode)."""
     return [
         "ffmpeg",
@@ -153,5 +162,5 @@ def build_streaming_cmd(video_path: Path, camera_id: str) -> list[str]:
         "-c:a", "copy",
         "-f", "rtsp",
         "-rtsp_transport", "tcp",
-        f"rtsp://{MEDIAMTX_HOST}:{MEDIAMTX_RTSP_PORT}/{camera_id}",
+        f"rtsp://{host}:{port}/{camera_id}",
     ]

@@ -1,18 +1,24 @@
+"""Macvlan sub-interface management (Linux only, requires NET_ADMIN)."""
+from __future__ import annotations
+
 import ipaddress
 import logging
 import subprocess
 import threading
+from typing import Optional
 
-logger = logging.getLogger('macvlan_manager')
+from app.exceptions import MacvlanError
+
+logger = logging.getLogger(__name__)
 
 
 class _IPAllocator:
-    def __init__(self, ip_start: str, ip_end: str):
+    def __init__(self, ip_start: str, ip_end: str) -> None:
         start = ipaddress.ip_address(ip_start)
         end = ipaddress.ip_address(ip_end)
         self.pool = [str(ipaddress.ip_address(int(start) + i))
                      for i in range(int(end) - int(start) + 1)]
-        self.allocated = set()
+        self.allocated: set[str] = set()
         self.lock = threading.Lock()
 
     def allocate(self) -> str:
@@ -21,13 +27,13 @@ class _IPAllocator:
                 if ip not in self.allocated:
                     self.allocated.add(ip)
                     return ip
-        raise Exception("No available IPs in macvlan range")
+        raise MacvlanError("No available IPs in macvlan range")
 
-    def release(self, ip: str):
+    def release(self, ip: str) -> None:
         with self.lock:
             self.allocated.discard(ip)
 
-    def mark_used(self, ip: str):
+    def mark_used(self, ip: str) -> None:
         with self.lock:
             self.allocated.add(ip)
 
@@ -47,7 +53,7 @@ class MacvlanManager:
     """
 
     def __init__(self, subnet: str, gateway: str, ip_start: str, ip_end: str,
-                 parent_iface: str, use_dhcp: bool = False):
+                 parent_iface: str, use_dhcp: bool = False) -> None:
         self.use_dhcp = use_dhcp
         # Resolve the actual interface name (auto-detect if configured name missing)
         self.parent_iface = self._resolve_parent_iface(parent_iface)
@@ -57,13 +63,11 @@ class MacvlanManager:
             self.prefix_len = self.subnet.prefixlen
             self._allocator = _IPAllocator(ip_start, ip_end)
             logger.info(
-                f"MacvlanManager initialized (static): parent={self.parent_iface}, "
-                f"range={ip_start}-{ip_end}, prefix=/{self.prefix_len}"
+                "MacvlanManager initialized (static): parent=%s, range=%s-%s, prefix=/%s",
+                self.parent_iface, ip_start, ip_end, self.prefix_len,
             )
         else:
-            logger.info(
-                f"MacvlanManager initialized (DHCP): parent={self.parent_iface}"
-            )
+            logger.info("MacvlanManager initialized (DHCP): parent=%s", self.parent_iface)
 
     def create_interface(self, camera_id: str) -> str:
         """Create a macvlan sub-interface and return the assigned IP.
@@ -75,7 +79,7 @@ class MacvlanManager:
             Assigned IP address string
 
         Raises:
-            Exception: If interface creation fails
+            MacvlanError: If interface creation fails
         """
         iface = self._iface_name(camera_id)
 
@@ -97,15 +101,15 @@ class MacvlanManager:
                     self._allocator.release(ip)
                     raise
 
-            logger.info(f"Created macvlan interface {iface} with IP {ip}")
+            logger.info("Created macvlan interface %s with IP %s", iface, ip)
             return ip
 
         except Exception as e:
             # Clean up partially created interface
             subprocess.run(["ip", "link", "del", iface], capture_output=True, check=False)
-            raise Exception(f"Failed to create macvlan interface {iface}: {e}") from e
+            raise MacvlanError(f"Failed to create macvlan interface {iface}: {e}") from e
 
-    def delete_interface(self, camera_id: str, camera_ip: str = None):
+    def delete_interface(self, camera_id: str, camera_ip: Optional[str] = None) -> None:
         """Delete a macvlan sub-interface and release its IP.
 
         Args:
@@ -120,13 +124,13 @@ class MacvlanManager:
 
         try:
             self._run(["ip", "link", "del", iface])
-            logger.info(f"Deleted macvlan interface {iface}")
+            logger.info("Deleted macvlan interface %s", iface)
         except Exception as e:
-            logger.warning(f"Failed to delete macvlan interface {iface}: {e}")
+            logger.warning("Failed to delete macvlan interface %s: %s", iface, e)
 
         if not self.use_dhcp and camera_ip:
             self._allocator.release(camera_ip)
-            logger.debug(f"Released IP {camera_ip} back to pool")
+            logger.debug("Released IP %s back to pool", camera_ip)
 
     def restore_interface(self, camera_id: str, camera_ip: str) -> str:
         """Recreate a macvlan interface from persisted config (on startup).
@@ -154,21 +158,21 @@ class MacvlanManager:
 
             if self.use_dhcp:
                 new_ip = self._dhcp_request(iface)
-                logger.info(f"Restored macvlan interface {iface} via DHCP, IP={new_ip}")
+                logger.info("Restored macvlan interface %s via DHCP, IP=%s", iface, new_ip)
                 return new_ip
             else:
                 self._allocator.mark_used(camera_ip)
                 self._run(["ip", "addr", "add", f"{camera_ip}/{self.prefix_len}", "dev", iface])
-                logger.info(f"Restored macvlan interface {iface} with static IP {camera_ip}")
+                logger.info("Restored macvlan interface %s with static IP %s", iface, camera_ip)
                 return camera_ip
 
         except Exception as e:
             subprocess.run(["ip", "link", "del", iface], capture_output=True, check=False)
             if not self.use_dhcp:
                 self._allocator.release(camera_ip)
-            raise Exception(f"Failed to restore macvlan interface {iface}: {e}") from e
+            raise MacvlanError(f"Failed to restore macvlan interface {iface}: {e}") from e
 
-    def cleanup_all(self):
+    def cleanup_all(self) -> None:
         """Delete all cam_* macvlan interfaces (called on shutdown)."""
         result = subprocess.run(
             ["ip", "link", "show"],
@@ -183,7 +187,7 @@ class MacvlanManager:
             if self.use_dhcp:
                 subprocess.run(["dhclient", "-r", iface], capture_output=True, check=False)
             subprocess.run(["ip", "link", "del", iface], capture_output=True, check=False)
-            logger.info(f"Cleaned up macvlan interface {iface}")
+            logger.info("Cleaned up macvlan interface %s", iface)
 
     def _dhcp_request(self, iface: str, timeout: int = 15) -> str:
         """Request an IP via DHCP and return the assigned address.
@@ -200,7 +204,7 @@ class MacvlanManager:
             capture_output=True, text=True, timeout=timeout
         )
         if result.returncode != 0:
-            raise Exception(
+            raise MacvlanError(
                 f"dhclient failed on {iface}: "
                 f"{result.stderr.strip() or result.stdout.strip()}"
             )
@@ -216,7 +220,7 @@ class MacvlanManager:
             line = line.strip()
             if line.startswith("inet "):
                 return line.split()[1].split("/")[0]
-        raise Exception(f"No IPv4 address found on interface {iface}")
+        raise MacvlanError(f"No IPv4 address found on interface {iface}")
 
     @staticmethod
     def _resolve_parent_iface(configured: str) -> str:
@@ -231,12 +235,12 @@ class MacvlanManager:
         result = subprocess.run(["ip", "link", "show", configured],
                                 capture_output=True, text=True)
         if result.returncode == 0:
-            logger.info(f"Using configured macvlan parent interface: {configured}")
+            logger.info("Using configured macvlan parent interface: %s", configured)
             return configured
 
         logger.warning(
-            f"Configured MACVLAN_PARENT_IFACE '{configured}' not found, "
-            "auto-detecting macvlan interface..."
+            "Configured MACVLAN_PARENT_IFACE '%s' not found, "
+            "auto-detecting macvlan interface...", configured,
         )
 
         # Find the default route interface (bridge network)
@@ -268,8 +272,8 @@ class MacvlanManager:
         if candidates:
             detected = candidates[0]
             logger.info(
-                f"Auto-detected macvlan parent interface: {detected} "
-                f"(default route is on {default_iface})"
+                "Auto-detected macvlan parent interface: %s (default route is on %s)",
+                detected, default_iface,
             )
             return detected
 
@@ -277,12 +281,12 @@ class MacvlanManager:
         # use eth0 as the parent (DHCP mode — no static IP on the macvlan iface)
         if default_iface:
             logger.warning(
-                f"No secondary interface found, falling back to default route "
-                f"interface: {default_iface}"
+                "No secondary interface found, falling back to default route "
+                "interface: %s", default_iface,
             )
             return default_iface
 
-        raise Exception(
+        raise MacvlanError(
             f"Cannot find macvlan parent interface. "
             f"Configured '{configured}' missing and auto-detection failed. "
             f"Set MACVLAN_PARENT_IFACE to the correct interface name."
@@ -293,7 +297,7 @@ class MacvlanManager:
         return f"cam_{camera_id[:8]}"
 
     @staticmethod
-    def _run(cmd: list):
+    def _run(cmd: list[str]) -> None:
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            raise Exception(result.stderr.strip() or result.stdout.strip())
+            raise MacvlanError(result.stderr.strip() or result.stdout.strip())

@@ -161,18 +161,26 @@ class DataCleanupScheduler:
         self.thread = None
 
 
+# ── Singleton accessor (lazy, double-checked locking) ──────────────────────
 _scheduler: DataCleanupScheduler | None = None
+_scheduler_lock = threading.Lock()
 
 
-def start_data_cleanup_scheduler(interval_hours: float = DATA_CLEANUP_INTERVAL_HOURS) -> DataCleanupScheduler:
+def get_scheduler() -> DataCleanupScheduler:
     global _scheduler
     if _scheduler is None:
-        _scheduler = DataCleanupScheduler(interval_hours)
-    _scheduler.start()
+        with _scheduler_lock:
+            if _scheduler is None:
+                _scheduler = DataCleanupScheduler()
     return _scheduler
 
 
+def start_data_cleanup_scheduler() -> DataCleanupScheduler:
+    scheduler = get_scheduler()
+    scheduler.start()
+    return scheduler
+
+
 def stop_data_cleanup_scheduler() -> None:
-    global _scheduler
-    if _scheduler:
+    if _scheduler is not None:
         _scheduler.stop()
