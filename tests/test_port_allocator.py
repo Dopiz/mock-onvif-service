@@ -82,6 +82,56 @@ class TestBoundPortSkipped:
             blocker.close()
 
 
+class TestAllocateBlock:
+    def test_block_is_contiguous_and_skips_holes(self):
+        # Layout: [used, FREE(hole), used, free x5] — a batch of 5 must skip
+        # the single-port hole and take the contiguous tail run.
+        base = _find_free_port_block(8)
+        alloc = PortAllocator(base, base + 8)
+        alloc.prime({base, base + 2})
+        assert alloc.allocate_block(5) == [base + 3, base + 4,
+                                           base + 5, base + 6, base + 7]
+
+    def test_hole_still_reused_by_single_allocate(self):
+        base = _find_free_port_block(8)
+        alloc = PortAllocator(base, base + 8)
+        alloc.prime({base, base + 2})
+        alloc.allocate_block(5)
+        # Singles keep first-fit: the hole is not wasted
+        assert alloc.allocate() == base + 1
+
+    def test_falls_back_to_scattered_when_fragmented(self):
+        # free ports: base+1, base+3, base+5 — no contiguous run of 3
+        base = _find_free_port_block(6)
+        alloc = PortAllocator(base, base + 6)
+        alloc.prime({base, base + 2, base + 4})
+        assert alloc.allocate_block(3) == [base + 1, base + 3, base + 5]
+
+    def test_insufficient_ports_raises_and_leaks_nothing(self):
+        base = _find_free_port_block(3)
+        alloc = PortAllocator(base, base + 3)
+        alloc.prime({base})
+        with pytest.raises(PortAllocationError):
+            alloc.allocate_block(3)
+        # the 2 free ports were not reserved by the failed call
+        assert alloc.allocate_block(2) == [base + 1, base + 2]
+
+    def test_zero_count_returns_empty(self):
+        alloc = PortAllocator(50000, 50000)
+        assert alloc.allocate_block(0) == []
+
+    def test_bound_port_breaks_the_run(self):
+        base = _find_free_port_block(5)
+        blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            blocker.bind(("127.0.0.1", base + 1))
+            blocker.listen(1)
+            alloc = PortAllocator(base, base + 5)
+            assert alloc.allocate_block(3) == [base + 2, base + 3, base + 4]
+        finally:
+            blocker.close()
+
+
 class TestPrime:
     def test_primed_ports_not_allocated(self):
         base = _find_free_port_block(2)

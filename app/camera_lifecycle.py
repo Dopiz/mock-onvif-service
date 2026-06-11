@@ -244,11 +244,20 @@ def _spawn_one(
     manufacturer: str,
     allocator: PortAllocator,
     repo: CameraRepository,
+    preallocated_port: Optional[int] = None,
 ) -> RuntimeState:
-    """Create one camera runtime that re-uses an already-transcoded shared video."""
+    """Create one camera runtime that re-uses an already-transcoded shared video.
+
+    ``preallocated_port`` is set by the batch path, which reserves a contiguous
+    port block up front so batch cameras get consecutive ports.
+    """
     camera_id = str(uuid.uuid4())
     with ExitStack() as stack:
-        onvif_port, camera_ip = _allocate_endpoint(camera_id, allocator, stack)
+        if preallocated_port is not None:
+            onvif_port, camera_ip = preallocated_port, None
+            stack.callback(allocator.release, preallocated_port)
+        else:
+            onvif_port, camera_ip = _allocate_endpoint(camera_id, allocator, stack)
         rec = CameraRecord(
             camera_id=camera_id,
             video_path=str(shared_path),
@@ -311,7 +320,13 @@ def create_cameras_batch(
     except Exception as e:
         logger.warning("Shared snapshot failed: %s", e)
 
-    # 4) Parallel per-camera setup
+    # 4) Reserve a contiguous port block so batch cameras get consecutive
+    #    ports (macvlan cameras all use port 80, so nothing to reserve there).
+    ports: list[Optional[int]] = [None] * count
+    if not MACVLAN_ENABLED:
+        ports = list(allocator.allocate_block(count))
+
+    # 5) Parallel per-camera setup
     results: list[RuntimeState] = []
     failed = 0
     max_workers = min(BATCH_MAX_WORKERS, count)
@@ -327,8 +342,9 @@ def create_cameras_batch(
                 manufacturer=manufacturer,
                 allocator=allocator,
                 repo=repo,
+                preallocated_port=ports[i],
             )
-            for _ in range(count)
+            for i in range(count)
         ]
         completed = 0
         for fut in as_completed(futures):
